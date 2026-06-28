@@ -86,8 +86,45 @@ default_axis: X               # X or Y — used when AXIS is not given
 margin: 20                    # mm to keep from each axis end
 z_pos: 20                     # Z height during XY tests
 monitor_tmc: True             # poll TMC StallGuard during moves
+testbench: False              # see "Testbench mode" below
 #output_dir: ~/printer_data/config/Speedtest
 ```
+
+### Testbench mode
+
+If you're testing a **single stepper on a bench** (only X wired, no Y, no Z,
+no full printer), set:
+
+```ini
+[speed_test]
+testbench: True
+default_axis: X
+```
+
+In testbench mode the plugin:
+- Only homes X (no `G28 Y`, no `G28 Z`, no full `G28`)
+- Doesn't lift Z before moves
+- Only checks X for skipped steps
+- Only samples X-stepper TMC (if present)
+- Refuses `SPEED_TEST_FIND_MAX_SCV` and `SPEED_TEST_BENCHMARK` (those need XY)
+
+You can also enable it per command without changing the config:
+
+```
+SPEED_TEST_FIND_MAX_VELOCITY AXIS=X TESTBENCH=1
+SPEED_TEST_FIND_MAX_ACCEL    AXIS=X TESTBENCH=1 SPEED=200
+```
+
+`TESTBENCH=0` forces it off even when the config has `testbench: True`.
+
+Make sure your `[endstop_phase]` either covers only X, or that you've added a
+real X endstop. A minimal testbench `[endstop_phase]` looks like:
+
+```ini
+[endstop_phase stepper_x]
+```
+
+That tracks X only and won't complain about a missing Y endstop.
 
 After `FIRMWARE_RESTART`, run `SPEED_TEST_STATUS` to verify the plugin loaded and your axes are recognised.
 
@@ -111,6 +148,7 @@ Finds the maximum safe **velocity** for an axis using adaptive bisection.
 | `VERIFY_REPEATS`   | 20      | Movements during verification                |
 | `MAX_BISECT_STEPS` | 6       | Cap on bisection iterations                  |
 | `DISTANCE`         | full    | `full` (axis end-to-end) or `short` (just enough to hit target velocity) |
+| `TESTBENCH`        | config  | `1` = single-stepper bench mode (X only, no Y/Z) |
 | `NO_HTML`          | 0       | Set to 1 for CSV-only output                 |
 
 ### `SPEED_TEST_FIND_MAX_ACCEL`
@@ -129,6 +167,7 @@ Finds the maximum safe **acceleration** at a fixed velocity.
 | `VERIFY_REPEATS`   | 50      | Movements during verification                |
 | `MAX_BISECT_STEPS` | 6       | Cap on bisection iterations                  |
 | `MIN_DISTANCE`     | 50      | Minimum movement distance (mm)               |
+| `TESTBENCH`        | config  | `1` = single-stepper bench mode (X only, no Y/Z) |
 | `NO_HTML`          | 0       | Set to 1 for CSV-only output                 |
 
 ### `SPEED_TEST_FIND_MAX_SCV`

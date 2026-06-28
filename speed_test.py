@@ -39,6 +39,10 @@ class SpeedTest:
         self.margin = config.getfloat('margin', 20.0, above=0.)
         self.z_pos = config.getfloat('z_pos', 20.0, minval=0.)
         self.monitor_tmc = config.getboolean('monitor_tmc', True)
+        # Testbench mode: only X-stepper connected, no Y, no Z. Skips all
+        # Y/Z homing and ignores Y in skip checks and TMC monitoring.
+        # Per-command TESTBENCH=1/0 override is honored.
+        self.testbench_default = config.getboolean('testbench', False)
 
         config_dir = os.path.expanduser('~/printer_data/config')
         if not os.path.isdir(config_dir):
@@ -132,19 +136,39 @@ class SpeedTest:
 
     # ─── Homing & skip detection ──────────────────────────────────────
 
-    def _ensure_homed(self, axes):
-        homed = self.printer.lookup_object(
-            'toolhead').get_status(self.reactor.monotonic()).get(
-                'homed_axes', '')
-        if 'x' not in homed or 'y' not in homed or 'z' not in homed:
-            self.gcode.run_script_from_command("G28")
+    def _ensure_homed(self, axes, testbench=False):
+        toolhead = self.printer.lookup_object('toolhead')
+        homed = toolhead.get_status(
+            self.reactor.monotonic()).get('homed_axes', '')
+
+        if testbench:
+            # Only home X — no Y, no Z. Useful for bench setups with a
+            # single stepper hooked up to X.
+            if 'x' not in homed:
+                self.gcode.run_script_from_command("G28 X")
+            else:
+                self.gcode.run_script_from_command("G28 X")
             return
-        # Re-home only the tested axes (full G28 already done previously)
+
         if self.structure == 'corexy':
+            # CoreXY: X and Y motors are mechanically coupled — must home both.
+            if 'x' not in homed or 'y' not in homed or 'z' not in homed:
+                self.gcode.run_script_from_command("G28")
+                return
             self.gcode.run_script_from_command("G28 X Y")
-        else:
+            return
+
+        # Cartesian: home only what's actually needed.
+        needed = {a.lower() for a in axes}
+        needed.add('z')  # Z is required so we can lift to z_pos safely
+        missing = [a for a in needed if a not in homed]
+        if missing:
+            # Home only the missing axes — never trigger Y unless we need Y.
             self.gcode.run_script_from_command(
-                "G28 " + " ".join(axes))
+                "G28 " + " ".join(a.upper() for a in missing))
+            return
+        self.gcode.run_script_from_command(
+            "G28 " + " ".join(axes))
 
     def _read_mcu_pos(self, axis):
         ep = self.printer.lookup_object('endstop_phase', None)
@@ -275,14 +299,17 @@ class SpeedTest:
             self.gcode.run_script_from_command(
                 "G1 Y%.3f F%.1f" % (pos, feed))
 
-    def _do_velocity_pattern(self, axis, velocity, distance, repeat):
+    def _do_velocity_pattern(self, axis, velocity, distance, repeat,
+                             testbench=False):
         ax_min, ax_max, ax_mid, ax_range = self._get_axis_bounds(axis)
         dist = min(distance, ax_range)
         feed = velocity * 60.
         low = ax_mid - dist / 2.0
         high = ax_mid + dist / 2.0
-        # Park at middle first
-        if axis == 'X':
+        # Park at middle first — skip Z in testbench mode (no Z motor)
+        if testbench:
+            self._move_to_axis(axis, ax_mid, velocity)
+        elif axis == 'X':
             self.gcode.run_script_from_command(
                 "G1 X%.3f Z%.3f F%.1f"
                 % (ax_mid, self.z_pos, feed))
@@ -382,9 +409,12 @@ class SpeedTest:
 
     # ─── Measurement step ─────────────────────────────────────────────
 
-    def _measure_step(self, gcmd, axes, label, value, do_pattern):
+    def _measure_step(self, gcmd, axes, label, value, do_pattern,
+                      testbench=False):
         """Run a movement pattern, re-home, return skip info + TMC stats."""
-        if self.structure == 'corexy':
+        if testbench:
+            sample_axes = ('X',)
+        elif self.structure == 'corexy':
             sample_axes = ('X', 'Y')
         else:
             sample_axes = tuple(axes)
@@ -398,7 +428,7 @@ class SpeedTest:
             self._stop_tmc_sampling()
 
         # Re-home and compare
-        self._ensure_homed(list(axes))
+        self._ensure_homed(list(axes), testbench=testbench)
         skips = self._check_skip(sample_axes)
         tmc_stats = {ax: self._tmc_stats(ax) for ax in sample_axes}
 
@@ -517,7 +547,14 @@ class SpeedTest:
 
     def cmd_FIND_MAX_VELOCITY(self, gcmd):
         self._check_endstop_phase()
+        testbench = bool(gcmd.get_int(
+            'TESTBENCH', 1 if self.testbench_default else 0,
+            minval=0, maxval=1))
         axis = gcmd.get('AXIS', self.default_axis).upper()
+        if testbench and axis != 'X':
+            raise gcmd.error(
+                "Testbench mode supports AXIS=X only "
+                "(single stepper wired to X).")
         if axis not in ('X', 'Y'):
             raise gcmd.error("AXIS must be X or Y")
         min_v = gcmd.get_float('MIN', 50.0, above=0.)
@@ -553,7 +590,7 @@ class SpeedTest:
                      repeat, accel=accel)
 
         self._set_limits(velocity=max_v * 1.5, accel=accel)
-        self._ensure_homed([axis])
+        self._ensure_homed([axis], testbench=testbench)
         results = []
 
         def measure_at(velocity, phase):
@@ -566,7 +603,9 @@ class SpeedTest:
                 dist = min(dist, ax_range)
             r = self._measure_step(
                 gcmd, [axis], 'V', velocity,
-                lambda: self._do_velocity_pattern(axis, velocity, dist, reps))
+                lambda: self._do_velocity_pattern(
+                    axis, velocity, dist, reps, testbench=testbench),
+                testbench=testbench)
             r['phase'] = phase
             r['accel'] = accel
             return r
@@ -584,7 +623,14 @@ class SpeedTest:
 
     def cmd_FIND_MAX_ACCEL(self, gcmd):
         self._check_endstop_phase()
+        testbench = bool(gcmd.get_int(
+            'TESTBENCH', 1 if self.testbench_default else 0,
+            minval=0, maxval=1))
         axis = gcmd.get('AXIS', self.default_axis).upper()
+        if testbench and axis != 'X':
+            raise gcmd.error(
+                "Testbench mode supports AXIS=X only "
+                "(single stepper wired to X).")
         if axis not in ('X', 'Y'):
             raise gcmd.error("AXIS must be X or Y")
         min_a = gcmd.get_float('MIN', 500.0, above=0.)
@@ -618,7 +664,7 @@ class SpeedTest:
                      repeat, speed=speed)
 
         self._set_limits(velocity=speed, accel=max_a * 1.5)
-        self._ensure_homed([axis])
+        self._ensure_homed([axis], testbench=testbench)
         results = []
 
         def measure_at(accel, phase):
@@ -628,7 +674,9 @@ class SpeedTest:
             dist = min(max(min_distance, 4 * cruise), ax_range)
             r = self._measure_step(
                 gcmd, [axis], 'A', accel,
-                lambda: self._do_velocity_pattern(axis, speed, dist, reps))
+                lambda: self._do_velocity_pattern(
+                    axis, speed, dist, reps, testbench=testbench),
+                testbench=testbench)
             r['phase'] = phase
             r['speed'] = speed
             return r
@@ -646,6 +694,11 @@ class SpeedTest:
 
     def cmd_FIND_MAX_SCV(self, gcmd):
         self._check_endstop_phase()
+        if self.testbench_default or gcmd.get_int('TESTBENCH', 0,
+                                                  minval=0, maxval=1):
+            raise gcmd.error(
+                "SCV test needs both X and Y motors — not available in "
+                "testbench mode.")
         min_s = gcmd.get_float('MIN', 1.0, above=0.)
         max_s = gcmd.get_float('MAX', 20.0, above=min_s)
         coarse = gcmd.get_float('COARSE_STEP', 2.0, above=0.)
@@ -698,6 +751,11 @@ class SpeedTest:
 
     def cmd_BENCHMARK(self, gcmd):
         self._check_endstop_phase()
+        if self.testbench_default or gcmd.get_int('TESTBENCH', 0,
+                                                  minval=0, maxval=1):
+            raise gcmd.error(
+                "Benchmark needs both X and Y motors — not available in "
+                "testbench mode.")
         speed = gcmd.get_float('SPEED', 300.0, above=0.)
         accel = gcmd.get_float('ACCEL', 10000.0, above=0.)
         iterations = gcmd.get_int('ITERATIONS', 3, minval=1, maxval=50)
@@ -756,11 +814,14 @@ class SpeedTest:
             "===== Speed Test v%s — STATUS =====\n"
             "Structure: %s\n"
             "Default axis: %s\n"
+            "Testbench mode (default): %s\n"
             "Z position for tests: %.1f mm\n"
             "Margin from axis ends: %.1f mm\n"
             "TMC SG monitoring: %s\n"
             "Output dir: %s"
             % (MODULE_VERSION, self.structure, self.default_axis,
+               "on (only X used, no Y/Z homing)"
+               if self.testbench_default else "off",
                self.z_pos, self.margin,
                "on" if self.monitor_tmc else "off",
                self.output_dir))
