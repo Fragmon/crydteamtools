@@ -87,6 +87,8 @@ margin: 20                    # mm to keep from each axis end
 z_pos: 20                     # Z height during XY tests
 monitor_tmc: True             # poll TMC StallGuard during moves
 testbench: False              # see "Testbench mode" below
+max_current: 1.5              # hard safety cap (A) for OPTIMAL_CURRENT.
+                              # 0 (default) = no cap.
 #output_dir: ~/printer_data/config/Speedtest
 ```
 
@@ -143,7 +145,8 @@ Finds the maximum safe **velocity** for an axis using adaptive bisection.
 | `MAX`              | 500     | Upper bound (mm/s)                           |
 | `COARSE_STEP`      | 25      | Phase-1 increment (mm/s)                     |
 | `MIN_STEP`         | 5       | Bisection precision (mm/s)                   |
-| `ACCEL`            | 5000    | Acceleration during the test (mm/s²)         |
+| `ACCEL`            | auto    | Acceleration (mm/s²). `0` or omitted = auto-compute so MAX hits the cruise target |
+| `CRUISE_RATIO`     | 0.5     | Minimum fraction of each move spent at the target velocity. 0.5 = at least half the distance at full speed |
 | `REPEAT`           | 5       | Movements per coarse/bisect step             |
 | `VERIFY_REPEATS`   | 20      | Movements during verification                |
 | `MAX_BISECT_STEPS` | 6       | Cap on bisection iterations                  |
@@ -166,9 +169,20 @@ Finds the maximum safe **acceleration** at a fixed velocity.
 | `REPEAT`           | 30      | Movements per coarse/bisect step             |
 | `VERIFY_REPEATS`   | 50      | Movements during verification                |
 | `MAX_BISECT_STEPS` | 6       | Cap on bisection iterations                  |
-| `MIN_DISTANCE`     | 50      | Minimum movement distance (mm)               |
+| `MAX_DIST_FACTOR`  | 4       | Upper bound for random moves: `MAX_DIST_FACTOR × V²/A`. 4 ≈ 75 % cruise at the long end, capped at axis range |
+| `SHORT_BIAS`       | 2       | Distribution skew: 1 = uniform, 2 = quadratic (default, ~75 % moves in the short half), 3 = cubic (even shorter) |
+| `SEED`             | 12345   | Random seed — same seed reproduces the same move sequence |
 | `TESTBENCH`        | config  | `1` = single-stepper bench mode (X only, no Y/Z) |
 | `NO_HTML`          | 0       | Set to 1 for CSV-only output                 |
+
+The accel test focuses on **direction-reversal stress**. Each move's distance is randomly chosen between:
+
+- **Min** = `V²/A` (the triangle distance — just barely touches `SPEED` at the peak, then immediately reverses)
+- **Max** = `MAX_DIST_FACTOR × V²/A` (capped at axis range)
+
+The distribution is biased toward the short end (`SHORT_BIAS=2` → ~75 % of moves are in the lower half of the range). The reasoning: motors that lose steps usually do so on the reversal, not during steady cruise. Short moves that just touch the target velocity and immediately decelerate stress the driver and motor harder than long sweeps.
+
+Set `SHORT_BIAS=1` for uniform distribution if you'd rather have a flat mix of short and long moves.
 
 ### `SPEED_TEST_FIND_MAX_SCV`
 
@@ -187,6 +201,57 @@ Finds the maximum safe **square-corner velocity** for XY.
 | `VERIFY_REPEATS`   | 5       | Pattern reps during verification             |
 | `MAX_BISECT_STEPS` | 6       | Cap on bisection iterations                  |
 | `NO_HTML`          | 0       | Set to 1 for CSV-only output                 |
+
+### `SPEED_TEST_FIND_OPTIMAL_CURRENT`
+
+Finds the **lowest** TMC `run_current` that still passes a `SPEED` / `ACCEL` performance target.
+
+Workflow:
+
+1. Run `SPEED_TEST_FIND_MAX_ACCEL` (or set a target manually) to know what your motor *can* do at full current
+2. Pick a comfortable performance target below that maximum (e.g. 80–90 %)
+3. Run `SPEED_TEST_FIND_OPTIMAL_CURRENT SPEED=… ACCEL=…` — the plugin starts at `MAX_CURRENT` and bisects downward until the test fails
+4. The recommended value = lowest passing current + `SAFETY_MARGIN`
+
+**Safety cap.** The `[speed_test] max_current` config option is a **hard ceiling** — the search will never raise current above this value, even if `MAX_CURRENT=` is set higher on the command. Always set this for testbench / new motor evaluation so you can't accidentally cook a small motor.
+
+| Parameter          | Default | Description                                  |
+| ------------------ | ------- | -------------------------------------------- |
+| `AXIS`             | default_axis | `X` or `Y`                              |
+| `SPEED`            | 200     | Target velocity (mm/s) — what the motor must achieve |
+| `ACCEL`            | 5000    | Target acceleration (mm/s²)                  |
+| `MAX_CURRENT`      | config / current | Upper bound of the search (A). Falls back to `[speed_test] max_current`, then to the current stepper's `run_current × 1.2` |
+| `MIN_CURRENT`      | 0.3     | Lower bound of the search (A)                |
+| `COARSE_STEP`      | 0.1     | Phase-1 decrement per step (A)               |
+| `MIN_STEP`         | 0.05    | Bisection precision (A)                      |
+| `SAFETY_MARGIN`    | 0.10    | Final result = `lowest_passing × (1 + SAFETY_MARGIN)` |
+| `REPEAT`           | 10      | Movements per current step                   |
+| `VERIFY_REPEATS`   | 30      | Movements during verification                |
+| `MAX_BISECT_STEPS` | 6       | Cap on bisection iterations                  |
+| `MAX_DIST_FACTOR`  | 4       | Upper bound for the per-move random distance |
+| `SHORT_BIAS`       | 2       | Short-move bias (same as accel test)         |
+| `SEED`             | 12345   | Same seed across all current steps so move sequences are identical → fair comparison |
+| `TESTBENCH`        | config  | `1` = single-stepper bench mode              |
+| `NO_HTML`          | 0       | Set to 1 for CSV-only output                 |
+
+When the test completes, the plugin **restores the original `run_current`** so you don't accidentally leave the motor running at a reduced setting. Apply the recommendation by updating `printer.cfg` and `FIRMWARE_RESTART`.
+
+**Example:**
+
+```
+# 1) First find what the motor can do at default current
+SPEED_TEST_FIND_MAX_ACCEL AXIS=X SPEED=200
+
+# Suppose this reports max safe accel = 25 000 mm/s². Pick 80 %:
+# target ACCEL = 20 000.
+
+# 2) Now find the lowest current that still does 20 000 at 200 mm/s
+SPEED_TEST_FIND_OPTIMAL_CURRENT AXIS=X SPEED=200 ACCEL=20000
+
+# Output: "Recommended (with margin): 0.85 A"
+
+# 3) Update printer.cfg → run_current: 0.85, FIRMWARE_RESTART.
+```
 
 ### `SPEED_TEST_BENCHMARK`
 
@@ -253,6 +318,55 @@ SPEED_TEST_BENCHMARK SPEED=500 ACCEL=20000 ITERATIONS=5
 # Diagnostic — confirm config is right before testing
 SPEED_TEST_STATUS
 ```
+
+---
+
+## Cruise-aware sizing
+
+A short axis combined with a high target velocity can give misleading results:
+the motor briefly touches the target speed at the peak of a triangle profile
+and immediately decelerates again, never actually *cruising* there.
+
+The plugin avoids that by sizing motion so that **at least half of every
+move** is spent at the target velocity (`CRUISE_RATIO` default 0.5).
+
+Two modes:
+
+**Auto-acceleration (`ACCEL` omitted or `0`)** — recommended.
+The plugin computes:
+
+```
+ACCEL ≥ MAX_V² / (axis_range × (1 − CRUISE_RATIO))
+```
+
+and rounds up to the nearest 500 mm/s². You'll see a line like:
+
+```
+Auto-set ACCEL = 26000 mm/s² so MAX=2000 mm/s has ≥50% cruise on 310 mm of usable X travel.
+```
+
+**Fixed acceleration (`ACCEL=…` given)** — useful for chasing motor limits.
+The plugin clips `MAX` down to the velocity where the cruise ratio still
+holds:
+
+```
+MAX = √(axis_range × ACCEL × (1 − CRUISE_RATIO))
+```
+
+You'll see:
+
+```
+MAX=2000 mm/s exceeds the velocity that keeps ≥50% cruise at ACCEL=5000 …
+Clipped MAX to 880 mm/s.
+To test higher, increase ACCEL or omit it for auto-sizing.
+```
+
+The achieved cruise fraction is reported per measurement (e.g. `cruise=58%`)
+and saved in the CSV/HTML report so you can verify each step was a fair test.
+
+`CRUISE_RATIO=0` reverts to the old behaviour (triangle profile, no cruise
+required). `CRUISE_RATIO=0.75` is stricter — useful when comparing motors
+under more realistic load.
 
 ---
 

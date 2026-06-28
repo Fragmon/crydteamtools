@@ -10,12 +10,13 @@
 import logging
 import math
 import os
+import random
 import statistics
 import time
 import json
 
 MODULE_NAME = "Speed Test"
-MODULE_VERSION = "1.0"
+MODULE_VERSION = "1.5"
 SAMPLE_INTERVAL = 0.05          # 20 Hz TMC polling during moves
 TMC_DRIVERS = ['tmc2240', 'tmc5160', 'tmc2209', 'tmc2226',
                'tmc2130', 'tmc2208', 'tmc2660']
@@ -43,6 +44,11 @@ class SpeedTest:
         # Y/Z homing and ignores Y in skip checks and TMC monitoring.
         # Per-command TESTBENCH=1/0 override is honored.
         self.testbench_default = config.getboolean('testbench', False)
+        # Hard safety cap for the OPTIMAL_CURRENT search. 0 = no cap
+        # (use TMC defaults / per-command MAX_CURRENT). When set, the
+        # plugin will never raise current above this value, even if a
+        # command parameter asks for more.
+        self.max_current = config.getfloat('max_current', 0.0, minval=0.)
 
         config_dir = os.path.expanduser('~/printer_data/config')
         if not os.path.isdir(config_dir):
@@ -75,6 +81,12 @@ class SpeedTest:
             'SPEED_TEST_BENCHMARK',
             self.cmd_BENCHMARK,
             desc='Repeatable random-pattern stress test at fixed speed/accel')
+        self.gcode.register_command(
+            'SPEED_TEST_FIND_OPTIMAL_CURRENT',
+            self.cmd_FIND_OPTIMAL_CURRENT,
+            desc='Find the lowest TMC run_current that still passes '
+                 'a SPEED/ACCEL target. Starts at MAX_CURRENT and '
+                 'searches downward.')
         self.gcode.register_command(
             'SPEED_TEST_STATUS',
             self.cmd_STATUS,
@@ -323,6 +335,62 @@ class SpeedTest:
             self._move_to_axis(axis, ax_mid, velocity)
         self.gcode.run_script_from_command("M400")
 
+    def _do_accel_pattern(self, axis, velocity, min_dist, max_dist,
+                          repeat, seed=12345, testbench=False,
+                          short_bias=2.0):
+        """Movement pattern for the accel test.
+
+        The main stress on a motor during the accel test comes from
+        rapid direction reversals — short back-and-forth moves where
+        the motor has to brake hard and accelerate again immediately.
+        So the distance distribution is biased toward the small end of
+        [min_dist, max_dist] via a power-law skew (short_bias > 1 →
+        more short moves, fewer long ones).
+
+        Each move also starts at a random offset along the axis so the
+        endstop_phase check sees varied positions, not a tight loop on
+        the same coordinate.
+        """
+        ax_min, ax_max, ax_mid, ax_range = self._get_axis_bounds(axis)
+
+        rng = random.Random(seed)
+
+        # Park at middle first — skip Z in testbench mode
+        if testbench:
+            self._move_to_axis(axis, ax_mid, velocity)
+        else:
+            feed = velocity * 60.
+            if axis == 'X':
+                self.gcode.run_script_from_command(
+                    "G1 X%.3f Z%.3f F%.1f"
+                    % (ax_mid, self.z_pos, feed))
+            else:
+                self.gcode.run_script_from_command(
+                    "G1 Y%.3f Z%.3f F%.1f"
+                    % (ax_mid, self.z_pos, feed))
+
+        # Clamp distance bounds to axis range and sanity-check
+        max_dist = min(max_dist, ax_range)
+        min_dist = max(0.5, min(min_dist, max_dist))
+
+        for _ in range(repeat):
+            # Power-law biased random: r^short_bias maps uniform [0,1] to
+            # a distribution that concentrates near 0 (short distances).
+            # short_bias=1 → uniform; 2 → quadratic skew; 3 → cubic, etc.
+            r = rng.random()
+            biased = r ** short_bias
+            dist = min_dist + (max_dist - min_dist) * biased
+            slack = max(0.0, ax_range - dist)
+            offset = rng.uniform(0.0, slack)
+            low = ax_min + offset
+            high = low + dist
+            # Three-leg motion: low → high → mid (the high→mid leg is
+            # the half-distance reversal stress)
+            self._move_to_axis(axis, low, velocity)
+            self._move_to_axis(axis, high, velocity)
+            self._move_to_axis(axis, ax_mid, velocity)
+        self.gcode.run_script_from_command("M400")
+
     def _do_scv_pattern(self, speed, corner_size, repeat):
         x_min, x_max, x_mid, _ = self._get_axis_bounds('X')
         y_min, y_max, y_mid, _ = self._get_axis_bounds('Y')
@@ -410,8 +478,9 @@ class SpeedTest:
     # ─── Measurement step ─────────────────────────────────────────────
 
     def _measure_step(self, gcmd, axes, label, value, do_pattern,
-                      testbench=False):
+                      testbench=False, cruise_fraction=None):
         """Run a movement pattern, re-home, return skip info + TMC stats."""
+        self._last_cruise_fraction = cruise_fraction
         if testbench:
             sample_axes = ('X',)
         elif self.structure == 'corexy':
@@ -436,11 +505,17 @@ class SpeedTest:
         max_diff = max((d for _, d in skips), default=0)
         skip_axes = ",".join(a for a, _ in skips)
 
+        cruise_str = ""
+        cf = getattr(self, '_last_cruise_fraction', None)
+        if cf is not None:
+            cruise_str = " | cruise=%.0f%%" % (cf * 100)
+            self._last_cruise_fraction = None
         gcmd.respond_info(
-            "  %s = %.1f  →  %s%s"
+            "  %s = %.1f  →  %s%s%s"
             % (label, value,
                "FAILED (%d steps on %s)" % (max_diff, skip_axes)
                if failed else "OK",
+               cruise_str,
                self._format_tmc(tmc_stats)))
 
         return {
@@ -561,7 +636,11 @@ class SpeedTest:
         max_v = gcmd.get_float('MAX', 500.0, above=min_v)
         coarse = gcmd.get_float('COARSE_STEP', 25.0, above=0.)
         min_step = gcmd.get_float('MIN_STEP', 5.0, above=0.)
-        accel = gcmd.get_float('ACCEL', 5000.0, above=0.)
+        # ACCEL=0 (default) → auto-compute from MAX_V and axis range so
+        # that at least CRUISE_RATIO of the move is spent at MAX velocity.
+        accel_param = gcmd.get_float('ACCEL', 0.0, minval=0.)
+        cruise_ratio = gcmd.get_float('CRUISE_RATIO', 0.5,
+                                       minval=0.0, maxval=0.95)
         repeat = gcmd.get_int('REPEAT', 5, minval=1, maxval=50)
         verify_repeats = gcmd.get_int('VERIFY_REPEATS', 20, minval=1, maxval=100)
         max_bisect = gcmd.get_int('MAX_BISECT_STEPS', 6, minval=2, maxval=15)
@@ -572,13 +651,38 @@ class SpeedTest:
             raise gcmd.error("MIN_STEP must be smaller than COARSE_STEP")
 
         ax_min, ax_max, ax_mid, ax_range = self._get_axis_bounds(axis)
-        if (max_v ** 2) / accel > ax_range:
-            new_max = math.sqrt(ax_range * accel)
+
+        # ─── Acceleration ⇄ velocity sizing ───
+        # Triangle (no cruise) needs V²/A. To keep CRUISE_RATIO at V, need
+        # total distance D ≥ V² / (A · (1 − CRUISE_RATIO)).
+        # → A ≥ V² / (D · (1 − CRUISE_RATIO))
+        # → V ≤ √(D · A · (1 − CRUISE_RATIO))
+        non_cruise = max(1 - cruise_ratio, 0.05)
+        if accel_param <= 0.0:
+            # Auto-compute acceleration so MAX velocity hits cruise target
+            need_accel = (max_v ** 2) / (ax_range * non_cruise)
+            accel = math.ceil(need_accel / 500.0) * 500.0
             gcmd.respond_info(
-                "MAX=%.1f exceeds axis range. Clipped to %.1f mm/s "
-                "(required distance > %.0f mm)."
-                % (max_v, new_max, ax_range))
-            max_v = new_max
+                "Auto-set ACCEL = %.0f mm/s² so MAX=%.0f mm/s has ≥%.0f%% "
+                "cruise on %.0f mm of usable %s travel."
+                % (accel, max_v, cruise_ratio * 100, ax_range, axis))
+        else:
+            accel = accel_param
+            v_limit = math.sqrt(ax_range * accel * non_cruise)
+            if max_v > v_limit:
+                gcmd.respond_info(
+                    "MAX=%.0f mm/s exceeds the velocity that keeps ≥%.0f%% "
+                    "cruise at ACCEL=%.0f mm/s² on %.0f mm of %s travel. "
+                    "Clipped MAX to %.0f mm/s.\n"
+                    "To test higher, increase ACCEL or omit it for "
+                    "auto-sizing."
+                    % (max_v, cruise_ratio * 100, accel, ax_range, axis,
+                       v_limit))
+                max_v = v_limit
+            if min_v >= max_v:
+                raise gcmd.error(
+                    "After clipping, MIN (%.0f) >= MAX (%.0f). Increase "
+                    "ACCEL or lower MIN." % (min_v, max_v))
 
         meta = self._build_meta('VELOCITY', axis,
                                 {'MIN': min_v, 'MAX': max_v,
@@ -596,18 +700,25 @@ class SpeedTest:
         def measure_at(velocity, phase):
             self._set_limits(velocity=velocity, accel=accel)
             reps = verify_repeats if phase == 'verify' else repeat
+            # Triangle distance V²/A. Total move distance to reach the
+            # configured cruise ratio: V²/A / (1 − cruise_ratio).
+            triangle = (velocity ** 2) / accel
+            min_for_cruise = triangle / non_cruise
             if distance == 'full':
                 dist = ax_range
             else:
-                dist = max(50., 4 * (velocity ** 2) / accel)
-                dist = min(dist, ax_range)
+                # Use enough distance to honor cruise ratio; cap at axis.
+                dist = min(max(50., min_for_cruise), ax_range)
+            actual_cruise = max(0.0, 1.0 - triangle / dist)
             r = self._measure_step(
                 gcmd, [axis], 'V', velocity,
                 lambda: self._do_velocity_pattern(
                     axis, velocity, dist, reps, testbench=testbench),
-                testbench=testbench)
+                testbench=testbench,
+                cruise_fraction=actual_cruise)
             r['phase'] = phase
             r['accel'] = accel
+            r['cruise_fraction'] = actual_cruise
             return r
 
         try:
@@ -642,18 +753,32 @@ class SpeedTest:
         verify_repeats = gcmd.get_int('VERIFY_REPEATS', 50, minval=1, maxval=300)
         max_bisect = gcmd.get_int('MAX_BISECT_STEPS', 6, minval=2, maxval=15)
         no_html = gcmd.get_int('NO_HTML', 0, minval=0, maxval=1)
-        min_distance = gcmd.get_float('MIN_DISTANCE', 50.0, above=0.)
+        # Random-distance pattern for the accel test:
+        #   min distance per move = V²/A (just barely reaches SPEED →
+        #     immediate reversal; this is the reversal-stress test)
+        #   max distance per move = MAX_DIST_FACTOR × V²/A, capped at axis
+        # Distribution biased toward short distances via SHORT_BIAS.
+        seed = gcmd.get_int('SEED', 12345)
+        max_dist_factor = gcmd.get_float(
+            'MAX_DIST_FACTOR', 4.0, minval=1.0, maxval=50.0)
+        short_bias = gcmd.get_float(
+            'SHORT_BIAS', 2.0, minval=1.0, maxval=10.0)
 
         if min_step >= coarse:
             raise gcmd.error("MIN_STEP must be smaller than COARSE_STEP")
 
         ax_min, ax_max, ax_mid, ax_range = self._get_axis_bounds(axis)
+        # At the lowest tested accel the triangle distance is largest
+        # (= SPEED² / MIN_A). It must fit in the axis range.
         required = (speed ** 2) / min_a
         if required > ax_range:
+            min_a_fit = math.ceil(
+                ((speed ** 2) / ax_range) / 500.0) * 500.0
             raise gcmd.error(
-                "Need %.0f mm of axis range for SPEED=%.0f at MIN=%.0f, "
-                "only %.0f mm available. Increase MIN or decrease SPEED."
-                % (required, speed, min_a, ax_range))
+                "Need %.0f mm to reach SPEED=%.0f at MIN=%.0f, but only "
+                "%.0f mm available.\n"
+                "Either raise MIN to ≥ %.0f mm/s² or lower SPEED."
+                % (required, speed, min_a, ax_range, min_a_fit))
 
         meta = self._build_meta('ACCEL', axis,
                                 {'MIN': min_a, 'MAX': max_a,
@@ -662,6 +787,16 @@ class SpeedTest:
         timestamp = time.strftime('%Y-%m-%d_%H-%M-%S')
         self._banner(gcmd, 'ACCEL', axis, min_a, max_a, coarse, min_step,
                      repeat, speed=speed)
+        gcmd.respond_info(
+            "Random moves per step — biased toward SHORT distances for "
+            "direction-reversal stress:\n"
+            "  min  = V²/A (just touches SPEED, immediate reversal)\n"
+            "  max  = %.1f × V²/A (capped at axis %.0f mm)\n"
+            "  bias = r^%.1f → ~%d%% of moves are in the lower half of "
+            "the range\n"
+            "  seed = %d"
+            % (max_dist_factor, ax_range, short_bias,
+               int(100 * (1 - 0.5 ** short_bias)), seed))
 
         self._set_limits(velocity=speed, accel=max_a * 1.5)
         self._ensure_homed([axis], testbench=testbench)
@@ -670,15 +805,31 @@ class SpeedTest:
         def measure_at(accel, phase):
             self._set_limits(velocity=speed, accel=accel)
             reps = verify_repeats if phase == 'verify' else repeat
-            cruise = (speed ** 2) / accel
-            dist = min(max(min_distance, 4 * cruise), ax_range)
+            triangle = (speed ** 2) / accel
+            # Min = triangle (just touches V, immediate reversal —
+            # the reversal-stress test). Max = factor × triangle,
+            # capped at axis range.
+            min_dist = triangle
+            max_dist = min(max_dist_factor * triangle, ax_range)
+            if max_dist < min_dist:
+                max_dist = min_dist
+            # Expected-mean distance under power-law bias r^short_bias is
+            # min + (max−min)/(short_bias+1). Use that for cruise reporting.
+            mean_dist = min_dist + (max_dist - min_dist) / (short_bias + 1.0)
+            mean_cruise = max(0.0, 1.0 - triangle / mean_dist)
+            step_seed = seed + int(accel)
             r = self._measure_step(
                 gcmd, [axis], 'A', accel,
-                lambda: self._do_velocity_pattern(
-                    axis, speed, dist, reps, testbench=testbench),
-                testbench=testbench)
+                lambda: self._do_accel_pattern(
+                    axis, speed, min_dist, max_dist, reps,
+                    seed=step_seed, testbench=testbench,
+                    short_bias=short_bias),
+                testbench=testbench,
+                cruise_fraction=mean_cruise)
             r['phase'] = phase
             r['speed'] = speed
+            r['cruise_fraction'] = mean_cruise
+            r['move_range'] = (min_dist, max_dist)
             return r
 
         try:
@@ -809,7 +960,349 @@ class SpeedTest:
                           "skipped steps" if r['failed'] else None,
                           no_html, 'benchmark', gcmd)
 
+    # ─── TMC current control ──────────────────────────────────────────
+
+    def _read_run_current(self, axis):
+        """Read the currently configured run_current from the TMC driver
+        on `axis`. Returns None on failure or no driver."""
+        info = self._lookup_tmc_for_axis(axis)
+        if info is None:
+            return None
+        _drv, tmc = info
+        try:
+            status = tmc.get_status(self.reactor.monotonic())
+            return status.get('run_current')
+        except Exception:
+            return None
+
+    def _set_run_current(self, axis, value):
+        """Set a stepper's run_current via SET_TMC_CURRENT."""
+        stepper_name = 'stepper_' + axis.lower()
+        self.gcode.run_script_from_command(
+            "SET_TMC_CURRENT STEPPER=%s CURRENT=%.3f"
+            % (stepper_name, value))
+
+    def _final_current_summary(self, gcmd, axis, optimal, min_passing,
+                                driver_name, verify_failed=False):
+        quality = ("verified OK" if not verify_failed
+                   else "VERIFY FAILED — bumped to fallback")
+        gcmd.respond_info(
+            "\n========== OPTIMAL CURRENT RESULT ==========\n"
+            "Axis: %s | Driver: %s\n"
+            "Minimum passing current:    %.3f A\n"
+            "Recommended (with margin):  %.3f A\n"
+            "Quality: %s\n"
+            "----------------------------------\n"
+            "To set permanently in printer.cfg:\n"
+            "  [%s stepper_%s]\n"
+            "  run_current:  %.3f\n"
+            "  hold_current: %.3f   # ~65%% of run_current\n"
+            "----------------------------------\n"
+            "Session-only:\n"
+            "  SET_TMC_CURRENT STEPPER=stepper_%s CURRENT=%.3f\n"
+            "=================================="
+            % (axis, driver_name, min_passing, optimal, quality,
+               driver_name, axis.lower(),
+               optimal, optimal * 0.65,
+               axis.lower(), optimal))
+
+    def cmd_FIND_OPTIMAL_CURRENT(self, gcmd):
+        """Find the minimum run_current that still passes a SPEED/ACCEL
+        target. Starts at MAX_CURRENT and searches downward via
+        adaptive bisection on the current value.
+        """
+        self._check_endstop_phase()
+        testbench = bool(gcmd.get_int(
+            'TESTBENCH', 1 if self.testbench_default else 0,
+            minval=0, maxval=1))
+        axis = gcmd.get('AXIS', self.default_axis).upper()
+        if testbench and axis != 'X':
+            raise gcmd.error(
+                "Testbench mode supports AXIS=X only.")
+        if axis not in ('X', 'Y'):
+            raise gcmd.error("AXIS must be X or Y")
+
+        # TMC driver is required to change current at runtime
+        info = self._lookup_tmc_for_axis(axis)
+        if info is None:
+            raise gcmd.error(
+                "No TMC driver found on stepper_%s. Current optimization "
+                "requires a TMC stepper driver." % axis.lower())
+        driver_name, _tmc = info
+
+        # Read original current — restored at the end
+        original_current = self._read_run_current(axis)
+        if original_current is None:
+            raise gcmd.error(
+                "Could not read run_current from %s on stepper_%s. "
+                "Cannot optimize without a known baseline."
+                % (driver_name, axis.lower()))
+
+        # Performance target
+        speed = gcmd.get_float('SPEED', 200.0, above=0.)
+        accel = gcmd.get_float('ACCEL', 5000.0, above=0.)
+
+        # MAX_CURRENT precedence: command param → config max_current →
+        # currently configured run_current (1.5× as upper search bound).
+        max_current_param = gcmd.get_float('MAX_CURRENT', 0., minval=0.)
+        if max_current_param > 0:
+            max_current = max_current_param
+        elif self.max_current > 0:
+            max_current = self.max_current
+        else:
+            max_current = max(original_current * 1.2, original_current + 0.1)
+
+        # Always apply the config safety cap on top
+        if self.max_current > 0 and max_current > self.max_current:
+            gcmd.respond_info(
+                "MAX_CURRENT clipped to config cap: %.3f A → %.3f A"
+                % (max_current, self.max_current))
+            max_current = self.max_current
+
+        min_current = gcmd.get_float('MIN_CURRENT', 0.3,
+                                      above=0., below=max_current)
+        coarse = gcmd.get_float('COARSE_STEP', 0.1, above=0.)
+        min_step = gcmd.get_float('MIN_STEP', 0.05, above=0.)
+        safety_margin = gcmd.get_float(
+            'SAFETY_MARGIN', 0.10, minval=0., maxval=1.)
+        repeat = gcmd.get_int('REPEAT', 10, minval=1, maxval=100)
+        verify_repeats = gcmd.get_int(
+            'VERIFY_REPEATS', 30, minval=1, maxval=300)
+        max_bisect = gcmd.get_int('MAX_BISECT_STEPS', 6, minval=2, maxval=15)
+        max_dist_factor = gcmd.get_float(
+            'MAX_DIST_FACTOR', 4.0, minval=1.0, maxval=50.0)
+        short_bias = gcmd.get_float(
+            'SHORT_BIAS', 2.0, minval=1.0, maxval=10.0)
+        no_html = gcmd.get_int('NO_HTML', 0, minval=0, maxval=1)
+        seed = gcmd.get_int('SEED', 12345)
+
+        if min_step >= coarse:
+            raise gcmd.error("MIN_STEP must be smaller than COARSE_STEP")
+
+        ax_min, ax_max, ax_mid, ax_range = self._get_axis_bounds(axis)
+        triangle = (speed ** 2) / accel
+        if triangle > ax_range:
+            raise gcmd.error(
+                "Need %.0f mm to reach SPEED=%.0f at ACCEL=%.0f, only "
+                "%.0f mm available on %s." % (triangle, speed, accel,
+                                              ax_range, axis))
+
+        meta = self._build_meta('CURRENT', axis, {
+            'driver': driver_name,
+            'original_current_A': '%.3f' % original_current,
+            'MIN_CURRENT': min_current, 'MAX_CURRENT': max_current,
+            'COARSE_STEP': coarse, 'MIN_STEP': min_step,
+            'SPEED': speed, 'ACCEL': accel, 'REPEAT': repeat,
+            'SAFETY_MARGIN': safety_margin,
+        })
+        timestamp = time.strftime('%Y-%m-%d_%H-%M-%S')
+
+        gcmd.respond_info(
+            "===== Speed Test v%s — OPTIMAL CURRENT on %s =====\n"
+            "Plugin by Steven (Fragmon) — Crydteam\n"
+            "Driver: %s | Currently configured: %.3f A\n"
+            "Performance target: SPEED=%.0f mm/s | ACCEL=%.0f mm/s²\n"
+            "Current search range: [%.3f A, %.3f A] | Coarse: %.2f | "
+            "Min step: %.3f\n"
+            "Reps: %d (verify %d) | Safety margin: +%.0f%%\n"
+            "Algorithm: start at MAX, search DOWN for minimum passing.\n"
+            "================================================"
+            % (MODULE_VERSION, axis, driver_name, original_current,
+               speed, accel, min_current, max_current,
+               coarse, min_step, repeat, verify_repeats,
+               safety_margin * 100))
+
+        self._set_limits(velocity=speed * 1.2, accel=accel)
+        self._ensure_homed([axis], testbench=testbench)
+
+        results = []
+
+        min_dist = triangle
+        max_dist = min(max_dist_factor * triangle, ax_range)
+        if max_dist < min_dist:
+            max_dist = min_dist
+
+        def measure_at_current(current_value, phase):
+            self._set_run_current(axis, current_value)
+            # Brief settle after current change
+            self.gcode.run_script_from_command("G4 P200")
+            # Read back the value the driver actually delivers (TMC
+            # drivers have discrete current steps and a hardware ceiling
+            # — asking for a value the driver can't hit silently rounds
+            # or caps). All bracket math uses this actual value.
+            actual = self._read_run_current(axis)
+            if actual is None:
+                actual = current_value
+            if abs(actual - current_value) > 0.02:
+                gcmd.respond_info(
+                    "  • Requested %.3f A, driver delivers %.3f A "
+                    "(discrete step / hardware cap)"
+                    % (current_value, actual))
+            reps = verify_repeats if phase == 'verify' else repeat
+            # Same seed across all current steps → identical move
+            # sequence, so any difference in outcome is caused by current.
+            r = self._measure_step(
+                gcmd, [axis], 'I', actual,
+                lambda: self._do_accel_pattern(
+                    axis, speed, min_dist, max_dist, reps,
+                    seed=seed, testbench=testbench,
+                    short_bias=short_bias),
+                testbench=testbench)
+            r['phase'] = phase
+            r['speed'] = speed
+            r['accel'] = accel
+            r['requested_current'] = current_value
+            r['actual_current'] = actual
+            return r
+
+        verify_failed = False
+        optimal = max_current
+        last_pass = max_current
+
+        try:
+            # ─── Phase 0: Sanity at MAX_CURRENT ───
+            gcmd.respond_info(
+                "\n>>> Phase 0: Sanity check at MAX = %.3f A <<<"
+                % max_current)
+            r0 = measure_at_current(max_current, 'sanity')
+            results.append(r0)
+            if r0['failed']:
+                raise gcmd.error(
+                    "Motor failed at MAX_CURRENT=%.3f A (actual %.3f A). "
+                    "Even maximum current can't pass SPEED=%.0f/"
+                    "ACCEL=%.0f. Reduce performance target or raise "
+                    "MAX_CURRENT (within driver/motor limits)."
+                    % (max_current, r0['actual_current'], speed, accel))
+            # Use the actual achieved current as the effective MAX from
+            # here on — that's what the driver can really deliver.
+            effective_max = r0['actual_current']
+            last_pass = effective_max
+            gcmd.respond_info(
+                "  ✓ Passes at MAX (actual %.3f A). Searching downward."
+                % effective_max)
+
+            # ─── Phase 1: Coarse downward sweep ───
+            gcmd.respond_info(
+                "\n>>> Phase 1: Coarse downward sweep "
+                "(step -%.3f A) <<<" % coarse)
+            first_fail = None
+            cur = effective_max - coarse
+            while cur >= min_current - 0.0001:
+                r = measure_at_current(cur, 'coarse')
+                results.append(r)
+                act = r['actual_current']
+                # Don't re-test currents the driver collapses to the
+                # same actual value as the last one
+                if act >= last_pass - 0.005:
+                    gcmd.respond_info(
+                        "  • Skipping: driver delivered %.3f A again "
+                        "(same as last). Decrementing request more."
+                        % act)
+                    cur -= coarse
+                    continue
+                if r['failed']:
+                    first_fail = act
+                    gcmd.respond_info(
+                        "  >>> FAIL at %.3f A → bracket (%.3f, %.3f]"
+                        % (act, act, last_pass))
+                    break
+                last_pass = act
+                cur -= coarse
+
+            if first_fail is None:
+                gcmd.respond_info(
+                    "Motor passes even down to %.3f A (request floor "
+                    "%.3f A). Lower MIN_CURRENT to search further."
+                    % (last_pass, min_current))
+                optimal = max(min_current,
+                              last_pass * (1 + safety_margin))
+                optimal = round(optimal / min_step) * min_step
+                self._set_run_current(axis, optimal)
+                actual_opt = self._read_run_current(axis) or optimal
+                self._final_current_summary(
+                    gcmd, axis, actual_opt, last_pass, driver_name)
+                self._save_report(results, meta, timestamp,
+                                  "passed down to MIN_CURRENT",
+                                  no_html, 'current', gcmd)
+                return
+
+            # ─── Phase 2: Bisection ───
+            # high = lowest known passing actual current
+            # low  = highest known failing actual current
+            high = last_pass
+            low = first_fail
+            gcmd.respond_info(
+                "\n>>> Phase 2: Bisection in (%.3f, %.3f] A <<<"
+                % (low, high))
+            iter_count = 0
+            same_count = 0
+            while (high - low) > min_step + 0.0001 and iter_count < max_bisect:
+                iter_count += 1
+                raw_mid = (low + high) / 2.0
+                mid = round(raw_mid / min_step) * min_step
+                if mid <= low + 0.0001 or mid >= high - 0.0001:
+                    break
+                r = measure_at_current(mid, 'bisect')
+                results.append(r)
+                act = r['actual_current']
+                if act >= high - 0.005 or act <= low + 0.005:
+                    same_count += 1
+                    gcmd.respond_info(
+                        "  • Driver delivered %.3f A — bracket can't "
+                        "narrow further at this resolution." % act)
+                    if same_count >= 2:
+                        break
+                if r['failed']:
+                    low = act
+                    gcmd.respond_info(
+                        "  >>> %.3f A FAIL → (%.3f, %.3f] (%d/%d)"
+                        % (act, low, high, iter_count, max_bisect))
+                else:
+                    high = act
+                    gcmd.respond_info(
+                        "  >>> %.3f A OK → (%.3f, %.3f] (%d/%d)"
+                        % (act, low, high, iter_count, max_bisect))
+
+            # ─── Phase 3: Verify at high + safety margin ───
+            optimal = high * (1 + safety_margin)
+            if optimal > effective_max:
+                optimal = effective_max
+            if optimal < high:
+                optimal = high
+
+            gcmd.respond_info(
+                "\n>>> Phase 3: Verify at OPTIMAL ≈ %.3f A "
+                "(min passing %.3f A + %.0f%% margin) <<<"
+                % (optimal, high, safety_margin * 100))
+            rv = measure_at_current(optimal, 'verify')
+            results.append(rv)
+            actual_optimal = rv['actual_current']
+
+            if rv['failed']:
+                verify_failed = True
+                fallback = min(effective_max, last_pass + coarse)
+                self._set_run_current(axis, fallback)
+                actual_optimal = self._read_run_current(axis) or fallback
+                gcmd.respond_info(
+                    "  ⚠ Verify FAILED at %.3f A — bumped to %.3f A "
+                    "as conservative fallback."
+                    % (rv['actual_current'], actual_optimal))
+
+            self._final_current_summary(
+                gcmd, axis, actual_optimal, high, driver_name,
+                verify_failed=verify_failed)
+        finally:
+            self._set_run_current(axis, original_current)
+            gcmd.respond_info(
+                "Restored original current: %.3f A" % original_current)
+
+        self._save_report(results, meta, timestamp,
+                          "verify failed" if verify_failed else None,
+                          no_html, 'current', gcmd)
+
     def cmd_STATUS(self, gcmd):
+        max_curr_str = ("%.3f A" % self.max_current
+                        if self.max_current > 0 else "unset (no cap)")
         gcmd.respond_info(
             "===== Speed Test v%s — STATUS =====\n"
             "Structure: %s\n"
@@ -818,12 +1311,14 @@ class SpeedTest:
             "Z position for tests: %.1f mm\n"
             "Margin from axis ends: %.1f mm\n"
             "TMC SG monitoring: %s\n"
+            "Max current cap: %s\n"
             "Output dir: %s"
             % (MODULE_VERSION, self.structure, self.default_axis,
                "on (only X used, no Y/Z homing)"
                if self.testbench_default else "off",
                self.z_pos, self.margin,
                "on" if self.monitor_tmc else "off",
+               max_curr_str,
                self.output_dir))
         ep = self.printer.lookup_object('endstop_phase', None)
         gcmd.respond_info(
@@ -833,7 +1328,13 @@ class SpeedTest:
             try:
                 lo, hi, mid, rng = self._get_axis_bounds(axis)
                 info = self._lookup_tmc_for_axis(axis)
-                tmc_str = ("TMC: %s" % info[0]) if info else "TMC: none"
+                if info:
+                    cur = self._read_run_current(axis)
+                    tmc_str = "TMC: %s, run_current=%s" % (
+                        info[0],
+                        "%.3f A" % cur if cur is not None else "unknown")
+                else:
+                    tmc_str = "TMC: none"
                 gcmd.respond_info(
                     "  %s: usable range [%.1f, %.1f] mm (width %.1f), %s"
                     % (axis, lo, hi, rng, tmc_str))
