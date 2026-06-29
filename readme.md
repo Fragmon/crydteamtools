@@ -13,7 +13,7 @@ A collection of Klipper diagnostic and tuning plugins by **Steven (Fragmon) — 
 
 | Plugin | Purpose |
 | ------ | ------- |
-| `speed_test.py` | Adaptive max-velocity / max-acceleration / max-SCV detection for steppers. Skipped-step detection via `endstop_phase`. CSV + HTML report. |
+| `speed_test.py` | Adaptive max-velocity / max-acceleration / max-SCV detection for steppers, plus a combined velocity–acceleration envelope sweep. Skipped-step detection via `endstop_phase`. CSV + HTML report. |
 
 > Looking for the extruder StallGuard flow test? That's in a separate repo: [klipper_max_flow_test](https://github.com/Fragmon/klipper_max_flow_test).
 
@@ -184,6 +184,38 @@ The distribution is biased toward the short end (`SHORT_BIAS=2` → ~75 % of mov
 
 Set `SHORT_BIAS=1` for uniform distribution if you'd rather have a flat mix of short and long moves.
 
+### `SPEED_TEST_FIND_ENVELOPE`
+
+Maps the **velocity–acceleration envelope** of an axis — the combined test.
+
+`FIND_MAX_ACCEL` finds the max accel at *one* fixed `SPEED`. But velocity and acceleration are physically coupled: a stepper's usable torque drops as speed rises (back-EMF eats into the current the driver can push through the windings), so the max safe acceleration is **lower at high velocity and higher at low velocity**. Pick the wrong `SPEED` for an accel test and the result is either unsafe at higher speeds or needlessly conservative at lower ones.
+
+This test sweeps several velocities and finds the max safe accel at each, producing the whole curve plus a balanced `max_velocity` / `max_accel` recommendation taken from the **knee** of the envelope (the point past which buying more speed costs the most acceleration).
+
+To save time, each velocity point warm-starts its accel search from the previous (lower-velocity) result — since the curve only falls as velocity rises, there's no need to re-climb from scratch each time.
+
+| Parameter          | Default | Description                                  |
+| ------------------ | ------- | -------------------------------------------- |
+| `AXIS`             | default_axis | `X` or `Y`                              |
+| `V_MIN`            | 100     | Lowest velocity in the sweep (mm/s)          |
+| `V_MAX`            | 500     | Highest velocity in the sweep (mm/s)         |
+| `V_POINTS`         | 5       | Number of velocities sampled between MIN and MAX |
+| `A_MIN`            | 1000    | Lower bound of the accel search (mm/s²)      |
+| `A_MAX`            | 50000   | Upper bound of the accel search (mm/s²)      |
+| `MIN_STEP`         | 250     | Accel bisection precision (mm/s²)            |
+| `REPEAT`           | 15      | Movements per accel step                     |
+| `VERIFY_REPEATS`   | 30      | Movements during each velocity's verify      |
+| `MAX_BISECT_STEPS` | 5       | Cap on bisection iterations per velocity     |
+| `MAX_DIST_FACTOR`  | 4       | Upper bound for random moves (same as accel test) |
+| `SHORT_BIAS`       | 2       | Short-move bias (same as accel test)         |
+| `SEED`             | 12345   | Random seed for reproducible move sequences  |
+| `TESTBENCH`        | config  | `1` = single-stepper bench mode (X only)     |
+| `NO_HTML`          | 0       | Set to 1 for CSV-only output                 |
+
+The console prints the full table plus three ready-to-paste operating points — **balanced** (the knee), **speed-priority** (highest velocity with its accel ceiling), and **accel-priority** (lowest velocity with the highest accel) — each already including a 10 % safety margin. The HTML report draws the envelope curve with the knee highlighted: anything on or below the line is safe.
+
+A velocity point is skipped if reaching it within the axis travel would require an accel above `A_MAX` (very short axes can't reach high speeds in a triangle move) — the skip is reported so you know the curve has a gap.
+
 ### `SPEED_TEST_FIND_MAX_SCV`
 
 Finds the maximum safe **square-corner velocity** for XY.
@@ -308,6 +340,12 @@ SPEED_TEST_FIND_MAX_ACCEL AXIS=X SPEED=200
 
 # Tighter precision on accel
 SPEED_TEST_FIND_MAX_ACCEL AXIS=X MIN_STEP=100 VERIFY_REPEATS=80
+
+# Map the combined velocity/acceleration envelope (5 speeds, 100–500 mm/s)
+SPEED_TEST_FIND_ENVELOPE AXIS=X
+
+# Finer envelope: 8 speeds up to 800 mm/s
+SPEED_TEST_FIND_ENVELOPE AXIS=Y V_MAX=800 V_POINTS=8
 
 # Find max square-corner velocity for printing motion
 SPEED_TEST_FIND_MAX_SCV SPEED=300 ACCEL=10000

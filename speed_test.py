@@ -16,7 +16,7 @@ import time
 import json
 
 MODULE_NAME = "Speed Test"
-MODULE_VERSION = "1.5"
+MODULE_VERSION = "1.6"
 SAMPLE_INTERVAL = 0.05          # 20 Hz TMC polling during moves
 TMC_DRIVERS = ['tmc2240', 'tmc5160', 'tmc2209', 'tmc2226',
                'tmc2130', 'tmc2208', 'tmc2660']
@@ -81,6 +81,11 @@ class SpeedTest:
             'SPEED_TEST_BENCHMARK',
             self.cmd_BENCHMARK,
             desc='Repeatable random-pattern stress test at fixed speed/accel')
+        self.gcode.register_command(
+            'SPEED_TEST_FIND_ENVELOPE',
+            self.cmd_FIND_ENVELOPE,
+            desc='Map the velocity-acceleration envelope: find max safe '
+                 'accel at several velocities (they are physically coupled)')
         self.gcode.register_command(
             'SPEED_TEST_FIND_OPTIMAL_CURRENT',
             self.cmd_FIND_OPTIMAL_CURRENT,
@@ -690,8 +695,8 @@ class SpeedTest:
                                  'ACCEL': accel, 'REPEAT': repeat,
                                  'DISTANCE': distance})
         timestamp = time.strftime('%Y-%m-%d_%H-%M-%S')
-        self._banner(gcmd, 'VELOCITY', axis, min_v, max_v, coarse, min_step,
-                     repeat, accel=accel)
+        self._banner(gcmd, 'VELOCITY', axis, min_v, max_v, repeat,
+                     accel=accel)
 
         self._set_limits(velocity=max_v * 1.5, accel=accel)
         self._ensure_homed([axis], testbench=testbench)
@@ -785,8 +790,7 @@ class SpeedTest:
                                  'COARSE_STEP': coarse, 'MIN_STEP': min_step,
                                  'SPEED': speed, 'REPEAT': repeat})
         timestamp = time.strftime('%Y-%m-%d_%H-%M-%S')
-        self._banner(gcmd, 'ACCEL', axis, min_a, max_a, coarse, min_step,
-                     repeat, speed=speed)
+        self._banner(gcmd, 'ACCEL', axis, min_a, max_a, repeat, speed=speed)
         gcmd.respond_info(
             "Random moves per step — biased toward SHORT distances for "
             "direction-reversal stress:\n"
@@ -843,6 +847,345 @@ class SpeedTest:
         self._save_report(results, meta, timestamp, reason,
                           no_html, 'accel', gcmd)
 
+    def cmd_FIND_ENVELOPE(self, gcmd):
+        """Map the velocity-acceleration envelope of an axis.
+
+        Velocity and acceleration are physically coupled: a stepper's
+        usable torque falls as speed rises (back-EMF eats into the
+        current the driver can push through the windings), so the max
+        safe acceleration is lower at high velocity and higher at low
+        velocity. A single FIND_MAX_ACCEL at one fixed SPEED only samples
+        one slice of that curve — pick the wrong SPEED and the resulting
+        accel is either unsafe at higher speeds or needlessly low at
+        lower ones.
+
+        This test sweeps several velocities and finds the max safe accel
+        at each, producing the whole envelope plus a balanced
+        max_velocity / max_accel recommendation (the knee of the curve).
+        """
+        self._check_endstop_phase()
+        testbench = bool(gcmd.get_int(
+            'TESTBENCH', 1 if self.testbench_default else 0,
+            minval=0, maxval=1))
+        axis = gcmd.get('AXIS', self.default_axis).upper()
+        if testbench and axis != 'X':
+            raise gcmd.error(
+                "Testbench mode supports AXIS=X only "
+                "(single stepper wired to X).")
+        if axis not in ('X', 'Y'):
+            raise gcmd.error("AXIS must be X or Y")
+        v_min = gcmd.get_float('V_MIN', 100.0, above=0.)
+        v_max = gcmd.get_float('V_MAX', 500.0, above=v_min)
+        v_points = gcmd.get_int('V_POINTS', 5, minval=2, maxval=12)
+        a_min = gcmd.get_float('A_MIN', 1000.0, above=0.)
+        a_max = gcmd.get_float('A_MAX', 50000.0, above=a_min)
+        min_step = gcmd.get_float('MIN_STEP', 250.0, above=0.)
+        repeat = gcmd.get_int('REPEAT', 15, minval=1, maxval=100)
+        verify_repeats = gcmd.get_int('VERIFY_REPEATS', 30,
+                                      minval=1, maxval=200)
+        max_bisect = gcmd.get_int('MAX_BISECT_STEPS', 5, minval=2, maxval=15)
+        max_dist_factor = gcmd.get_float('MAX_DIST_FACTOR', 4.0, minval=1.)
+        short_bias = gcmd.get_float('SHORT_BIAS', 2.0, minval=1., maxval=5.)
+        seed = gcmd.get_int('SEED', 12345)
+        no_html = gcmd.get_int('NO_HTML', 0, minval=0, maxval=1)
+
+        ax_min, ax_max, ax_mid, ax_range = self._get_axis_bounds(axis)
+
+        # Velocity sweep points (ascending).
+        step = (v_max - v_min) / (v_points - 1)
+        v_list = [v_min + step * i for i in range(v_points)]
+
+        timestamp = time.strftime('%Y-%m-%d_%H-%M-%S')
+        meta = self._build_meta('ENVELOPE', axis,
+                                {'V_MIN': v_min, 'V_MAX': v_max,
+                                 'V_POINTS': v_points, 'A_MIN': a_min,
+                                 'A_MAX': a_max, 'MIN_STEP': min_step,
+                                 'REPEAT': repeat})
+        gcmd.respond_info(
+            "===== Speed Test v%s — V/A ENVELOPE on %s =====\n"
+            "Plugin by Steven (Fragmon) — Crydteam\n"
+            "Sweeping %d velocities %.0f → %.0f mm/s; finding max safe "
+            "accel at each.\n"
+            "Why combined: motor torque drops as speed rises, so max accel "
+            "depends on velocity.\n"
+            "Usable %s travel: %.0f mm | %d moves/step\n"
+            "================================================"
+            % (MODULE_VERSION, axis, v_points, v_min, v_max, axis,
+               ax_range, repeat))
+
+        self._set_limits(velocity=v_max * 1.2, accel=a_max)
+        self._ensure_homed([axis], testbench=testbench)
+        results = []
+        envelope = []
+        prev_amax = None
+
+        try:
+            for idx, v in enumerate(v_list):
+                # Lowest accel that still lets a move actually reach v
+                # within the axis: the triangle distance V²/A must fit,
+                # so A ≥ V²/range. Below that the move never hits v.
+                a_floor = (v * v) / ax_range
+                low = max(a_min, a_floor * 1.05)
+                low = math.ceil(low / min_step) * min_step
+                # Warm-start the upper bound from the previous (lower-V)
+                # result — the envelope only falls as V rises, so there's
+                # no need to re-climb all the way to A_MAX every time.
+                high = a_max if prev_amax is None \
+                    else min(a_max, prev_amax * 1.3)
+                if high <= low + min_step:
+                    gcmd.respond_info(
+                        "  ▶ V=%.0f mm/s needs accel ≥ %.0f mm/s² just to "
+                        "reach this speed within %.0f mm of travel — that's "
+                        "above A_MAX (%.0f). Skipped."
+                        % (v, low, ax_range, a_max))
+                    continue
+                # Keep the coarse climb to ~6 steps regardless of bracket.
+                coarse = max(min_step * 2.0, (high - low) / 6.0)
+
+                gcmd.respond_info(
+                    "\n──────── V=%.0f mm/s (%d/%d) — max accel in "
+                    "[%.0f, %.0f] mm/s² ────────"
+                    % (v, idx + 1, v_points, low, high))
+
+                def measure_at(accel, phase, _v=v):
+                    self._set_limits(velocity=_v, accel=accel)
+                    reps = verify_repeats if phase == 'verify' else repeat
+                    triangle = (_v * _v) / accel
+                    min_dist = triangle
+                    max_dist = min(max_dist_factor * triangle, ax_range)
+                    if max_dist < min_dist:
+                        max_dist = min_dist
+                    mean_dist = (min_dist
+                                 + (max_dist - min_dist) / (short_bias + 1.0))
+                    mean_cruise = max(0.0, 1.0 - triangle / mean_dist)
+                    r = self._measure_step(
+                        gcmd, [axis], 'A', accel,
+                        lambda: self._do_accel_pattern(
+                            axis, _v, min_dist, max_dist, reps,
+                            seed=seed + int(accel), testbench=testbench,
+                            short_bias=short_bias),
+                        testbench=testbench, cruise_fraction=mean_cruise)
+                    r['phase'] = phase
+                    r['velocity'] = _v
+                    r['accel'] = accel
+                    return r
+
+                safe, _reason, _ = self._adaptive_find_max(
+                    gcmd, results, low, high, coarse, min_step,
+                    verify_repeats, max_bisect, 'A', measure_at)
+                envelope.append((v, safe))
+                prev_amax = safe
+                gcmd.respond_info(
+                    "  ✓ V=%.0f mm/s  →  max safe accel ≈ %.0f mm/s²"
+                    % (v, safe))
+        finally:
+            self._restore_limits()
+
+        if len(envelope) < 2:
+            raise gcmd.error(
+                "Envelope needs at least 2 testable velocity points. "
+                "Lower V_MAX, raise A_MAX, or test on a longer axis.")
+
+        self._envelope_summary(gcmd, axis, envelope)
+        self._save_envelope_report(envelope, results, meta, timestamp,
+                                   no_html, gcmd)
+
+    def _find_knee(self, envelope):
+        """Index of the curve's 'knee' — the velocity past which buying
+        more speed costs the most acceleration. Kneedle-style: the point
+        farthest from the chord between the first and last samples,
+        measured in normalized V/A space."""
+        n = len(envelope)
+        if n <= 2:
+            return n - 1
+        vs = [p[0] for p in envelope]
+        as_ = [p[1] for p in envelope]
+        v0 = vs[0]
+        dv = (vs[-1] - vs[0]) or 1.0
+        amin, amax = min(as_), max(as_)
+        da = (amax - amin) or 1.0
+        na0 = (as_[0] - amin) / da
+        na1 = (as_[-1] - amin) / da
+        slope = na1 - na0
+        denom = math.sqrt(1.0 + slope * slope)
+        best_i, best_d = 0, -1.0
+        for i in range(n):
+            nv = (vs[i] - v0) / dv
+            na = (as_[i] - amin) / da
+            d = abs(nv * slope - (na - na0)) / denom
+            if d > best_d:
+                best_d, best_i = d, i
+        return best_i
+
+    def _envelope_summary(self, gcmd, axis, envelope):
+        envelope = sorted(envelope, key=lambda p: p[0])
+        table = "\n".join(
+            "  V=%-4.0f mm/s   →   max accel %6.0f mm/s²" % (v, a)
+            for v, a in envelope)
+        knee_i = self._find_knee(envelope)
+        vk, ak = envelope[knee_i]
+        v_lo, a_lo = envelope[0]      # slowest velocity → highest accel
+        v_hi, a_hi = envelope[-1]     # fastest velocity → lowest accel
+        m = 0.9                       # 10 % safety margin on both axes
+        gcmd.respond_info(
+            "\n========== V/A ENVELOPE RESULT (%s) ==========\n"
+            "%s\n"
+            "----------------------------------\n"
+            "The motor trades speed for acceleration. Pick the operating\n"
+            "point that matches your prints, then set BOTH in printer.cfg.\n"
+            "----------------------------------\n"
+            "Balanced (knee) — recommended:\n"
+            "  [printer]\n"
+            "  max_velocity: %.0f\n"
+            "  max_accel:    %.0f\n"
+            "----------------------------------\n"
+            "Speed-priority (long travels): max_velocity %.0f + "
+            "max_accel %.0f\n"
+            "Accel-priority (small parts):  max_velocity %.0f + "
+            "max_accel %.0f\n"
+            "(all recommendations include a 10%% safety margin)\n"
+            "================================="
+            % (axis, table,
+               vk * m, ak * m,
+               v_hi * m, a_hi * m,
+               v_lo * m, a_lo * m))
+
+    def _save_envelope_report(self, envelope, results, meta, timestamp,
+                              no_html, gcmd):
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+            csv_path = os.path.join(
+                self.output_dir, 'speed_envelope_%s.csv' % timestamp)
+            self._write_envelope_csv(csv_path, envelope, results, meta)
+            if gcmd is not None:
+                gcmd.respond_info("CSV saved: %s" % csv_path)
+            if not no_html:
+                html_path = os.path.join(
+                    self.output_dir, 'speed_envelope_%s.html' % timestamp)
+                self._write_envelope_html(html_path, envelope, meta)
+                if gcmd is not None:
+                    gcmd.respond_info("HTML saved: %s" % html_path)
+        except Exception as e:
+            if gcmd is not None:
+                gcmd.respond_info("Warning: report write failed: %s" % e)
+            logging.exception("speed_test: envelope report write failed")
+
+    def _write_envelope_csv(self, path, envelope, results, meta):
+        with open(path, 'w') as f:
+            f.write("# Speed Test v%s — V/A ENVELOPE\n" % MODULE_VERSION)
+            f.write("# Plugin by Steven (Fragmon) — Crydteam\n")
+            f.write("# YouTube: https://www.youtube.com/@crydteamprinting\n")
+            for k, v in meta.items():
+                f.write("# %s: %s\n" % (k, v))
+            f.write("# --- envelope: max safe accel per velocity ---\n")
+            f.write("velocity_mm_s,max_accel_mm_s2\n")
+            for v, a in sorted(envelope, key=lambda p: p[0]):
+                f.write("%.1f,%.1f\n" % (v, a))
+            f.write("# --- all measurements ---\n")
+            f.write("velocity,accel,phase,failed,lost_steps,skip_axes\n")
+            for r in results:
+                f.write("%.1f,%.1f,%s,%d,%d,%s\n" % (
+                    r.get('velocity', 0.0),
+                    r['value'],
+                    r.get('phase', 'coarse'),
+                    1 if r['failed'] else 0,
+                    r['max_diff'], r['skip_axes'] or '-'))
+
+    def _write_envelope_html(self, path, envelope, meta):
+        envelope = sorted(envelope, key=lambda p: p[0])
+        vs = [v for v, _ in envelope]
+        as_ = [a for _, a in envelope]
+        knee_i = self._find_knee(envelope)
+        vk, ak = envelope[knee_i]
+        knee_pts = [None] * len(envelope)
+        knee_pts[knee_i] = ak
+        meta_html = ''.join(
+            '<div><strong>%s:</strong> %s</div>' % (k, v)
+            for k, v in meta.items())
+        rows = "".join(
+            "<tr%s><td>%.0f</td><td>%.0f</td></tr>"
+            % (' style="background:#fff3cd"' if i == knee_i else '', v, a)
+            for i, (v, a) in enumerate(envelope))
+        tpl = """<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<title>Speed Test (V/A Envelope) — %(ts)s</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0"></script>
+<style>
+body { font-family: system-ui, sans-serif; max-width: 1000px;
+       margin: 20px auto; padding: 0 20px; color:#333; }
+h1 { color:#1565c0; }
+.meta { background:#f5f5f5; padding:15px; border-radius:8px;
+        margin-bottom:20px; display:grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px,1fr));
+        gap:8px; font-size:14px; }
+.summary { background:#e3f2fd; padding:15px; border-radius:8px;
+           margin-bottom:20px; border-left:4px solid #1976d2; }
+.summary h2 { margin:0 0 10px 0; color:#1976d2; }
+.chart-container { background:white; padding:20px; border-radius:8px;
+                   margin-bottom:20px; box-shadow:0 2px 4px rgba(0,0,0,.1); }
+table { width:100%%; border-collapse:collapse; font-size:14px; }
+th,td { padding:8px 12px; border:1px solid #ddd; text-align:right; }
+th { background:#f5f5f5; }
+.footer { text-align:center; color:#666; padding:20px; font-size:13px; }
+.footer a { color:#1976d2; }
+</style></head><body>
+<h1>Speed Test — Velocity / Acceleration Envelope</h1>
+<p style="color:#666;margin-top:-10px;">
+  Plugin by Steven (Fragmon) — Crydteam ·
+  <a href="https://www.youtube.com/@crydteamprinting" target="_blank">YouTube: @crydteamprinting</a></p>
+<div class="meta">%(meta_html)s</div>
+<div class="summary">
+  <h2>Recommended balanced point (knee)</h2>
+  <p>max_velocity <strong>%(vk).0f</strong> mm/s &nbsp;+&nbsp;
+     max_accel <strong>%(ak).0f</strong> mm/s²
+     <em>(raw knee value — apply your own safety margin)</em></p>
+  <p>Everything on or below the curve is safe: pick any (velocity, accel)
+     pair under the line and set <em>both</em> in printer.cfg.</p>
+</div>
+<div class="chart-container">
+  <h2>Max safe acceleration vs. velocity</h2>
+  <canvas id="envChart"></canvas>
+</div>
+<div class="chart-container">
+  <h2>Data table</h2>
+  <table><thead><tr><th>Velocity (mm/s)</th>
+    <th>Max safe accel (mm/s²)</th></tr></thead>
+    <tbody>%(rows)s</tbody></table>
+</div>
+<div class="footer"><p>Generated by <strong>%(plugin)s</strong> at %(ts)s</p></div>
+<script>
+const vs = %(vs)s, accels = %(as)s, knee = %(knee)s;
+new Chart(document.getElementById('envChart'), {
+  type:'line',
+  data:{ labels: vs, datasets:[
+    { label:'Max safe accel', data: accels, borderColor:'#1976d2',
+      backgroundColor:'rgba(25,118,210,.12)', fill:true, tension:.2,
+      pointRadius:4 },
+    { label:'Knee (balanced)', data: knee, borderColor:'#fb8c00',
+      backgroundColor:'#fb8c00', pointRadius:8, showLine:false },
+  ]},
+  options:{ responsive:true,
+    scales:{ x:{ title:{display:true, text:'Velocity (mm/s)'} },
+             y:{ title:{display:true, text:'Max safe acceleration (mm/s²)'},
+                 beginAtZero:true } },
+    plugins:{ legend:{position:'top'} } },
+});
+</script>
+</body></html>"""
+        html = tpl % {
+            'ts': meta.get('timestamp', '-'),
+            'plugin': '%s v%s' % (MODULE_NAME, MODULE_VERSION),
+            'meta_html': meta_html,
+            'vk': vk, 'ak': ak,
+            'rows': rows,
+            'vs': json.dumps([round(v, 1) for v in vs]),
+            'as': json.dumps([round(a, 1) for a in as_]),
+            'knee': json.dumps([round(a, 1) if a is not None else None
+                                for a in knee_pts]),
+        }
+        with open(path, 'w') as f:
+            f.write(html)
+
     def cmd_FIND_MAX_SCV(self, gcmd):
         self._check_endstop_phase()
         if self.testbench_default or gcmd.get_int('TESTBENCH', 0,
@@ -871,8 +1214,8 @@ class SpeedTest:
                                  'SPEED': speed, 'ACCEL': accel,
                                  'CORNER_SIZE': corner_size, 'REPEAT': repeat})
         timestamp = time.strftime('%Y-%m-%d_%H-%M-%S')
-        self._banner(gcmd, 'SCV', 'XY', min_s, max_s, coarse, min_step,
-                     repeat, speed=speed, accel=accel)
+        self._banner(gcmd, 'SCV', 'XY', min_s, max_s, repeat,
+                     speed=speed, accel=accel)
 
         self._set_limits(velocity=speed, accel=accel, scv=min_s)
         self._ensure_homed(['X', 'Y'])
@@ -1102,14 +1445,13 @@ class SpeedTest:
             "Plugin by Steven (Fragmon) — Crydteam\n"
             "Driver: %s | Currently configured: %.3f A\n"
             "Performance target: SPEED=%.0f mm/s | ACCEL=%.0f mm/s²\n"
-            "Current search range: [%.3f A, %.3f A] | Coarse: %.2f | "
-            "Min step: %.3f\n"
-            "Reps: %d (verify %d) | Safety margin: +%.0f%%\n"
-            "Algorithm: start at MAX, search DOWN for minimum passing.\n"
+            "Current search range: %.3f → %.3f A | %d moves/step "
+            "(verify %d) | Safety margin: +%.0f%%\n"
+            "Method: start at MAX, search DOWN for the minimum that passes.\n"
             "================================================"
             % (MODULE_VERSION, axis, driver_name, original_current,
                speed, accel, min_current, max_current,
-               coarse, min_step, repeat, verify_repeats,
+               repeat, verify_repeats,
                safety_margin * 100))
 
         self._set_limits(velocity=speed * 1.2, accel=accel)
@@ -1359,22 +1701,23 @@ class SpeedTest:
             meta[k] = "%.3f" % val if isinstance(val, float) else str(val)
         return meta
 
-    def _banner(self, gcmd, kind, axis, lo, hi, coarse, min_step, repeat,
+    def _banner(self, gcmd, kind, axis, lo, hi, repeat,
                 speed=None, accel=None):
-        extra = []
+        unit = {'VELOCITY': 'mm/s', 'ACCEL': 'mm/s²',
+                'SCV': 'mm/s'}.get(kind, '')
+        ctx = []
         if speed is not None:
-            extra.append("Speed: %.1f mm/s" % speed)
+            ctx.append("speed %.0f mm/s" % speed)
         if accel is not None:
-            extra.append("Accel: %.0f mm/s²" % accel)
+            ctx.append("accel %.0f mm/s²" % accel)
+        ctx_str = ("\nFixed: " + ", ".join(ctx)) if ctx else ""
         gcmd.respond_info(
-            "===== Speed Test v%s — %s on %s =====\n"
+            "===== Speed Test v%s — find max %s on %s =====\n"
             "Plugin by Steven (Fragmon) — Crydteam\n"
-            "Range: %.1f → %.1f | Coarse: %.1f | Min: %.1f | Repeat: %d\n"
-            "%s\n"
-            "Algorithm: ADAPTIVE BISECTION (Coarse → Bisect → Verify)\n"
+            "Search range: %.0f → %.0f %s | %d moves/step%s\n"
+            "Method: adaptive bisection (coarse → bisect → verify)\n"
             "================================================"
-            % (MODULE_VERSION, kind, axis, lo, hi, coarse, min_step, repeat,
-               " | ".join(extra) if extra else ""))
+            % (MODULE_VERSION, kind, axis, lo, hi, unit, repeat, ctx_str))
 
     def _final_summary(self, gcmd, kind, axis, safe, results):
         verify = [r for r in results if r.get('phase') == 'verify']
@@ -1385,18 +1728,25 @@ class SpeedTest:
             quality = "VERIFY FAILED — value may be unstable"
         else:
             quality = "no verification phase"
+        # Map each test to the printer.cfg key + unit it actually feeds,
+        # so the result is a value the user can paste straight in.
+        cfg = {
+            'VELOCITY': ('max_velocity', 'mm/s'),
+            'ACCEL':    ('max_accel', 'mm/s²'),
+            'SCV':      ('square_corner_velocity', 'mm/s'),
+        }
+        cfg_key, unit = cfg.get(kind, (kind.lower(), ''))
         gcmd.respond_info(
-            "\n========== %s RESULT ==========\n"
-            "Axis: %s | Test: %s\n"
-            "Maximum safe %s: %.1f\n"
-            "Quality: %s\n"
+            "\n========== %s RESULT (%s) ==========\n"
+            "Max safe value: %.1f %s   (%s)\n"
             "----------------------------------\n"
-            "Slicer / printer.cfg recommendation:\n"
-            "  Conservative (80%%): %.1f\n"
-            "  Aggressive   (90%%): %.1f\n"
+            "Recommended for printer.cfg [printer]:\n"
+            "  %s: %.1f %s   # safe limit −10%% margin\n"
+            "  conservative −20%%: %.1f %s\n"
             "================================="
-            % (kind, axis, kind, kind, safe, quality,
-               safe * 0.8, safe * 0.9))
+            % (kind, axis, safe, unit, quality,
+               cfg_key, safe * 0.9, unit,
+               safe * 0.8, unit))
 
     def _write_csv(self, path, results, meta, kind):
         with open(path, 'w') as f:
