@@ -1091,10 +1091,15 @@ class SpeedTest:
         # travel moves.
         bench_short = gcmd.get_int('BENCH_SHORT', 400, minval=0, maxval=5000)
         bench_long = gcmd.get_int('BENCH_LONG', 60, minval=0, maxval=2000)
-        # Benchmark in chunks: re-home + skip-check every BENCH_CHUNK moves
-        # and abort on the first failing chunk, so a stall grinds at most
-        # one chunk instead of the whole run.
-        bench_chunk = gcmd.get_int('BENCH_CHUNK', 80, minval=10, maxval=1000)
+        # Benchmark in chunks: re-home + skip-check after each, abort on the
+        # first failing chunk so a stall grinds at most one chunk. The first
+        # chunk is BENCH_CHUNK moves; each clean chunk grows the next by
+        # BENCH_CHUNK_GROW (capped at 8×), so checks are tight early — when a
+        # stall is most likely and grinding must stay short — and loosen as
+        # the motor proves itself, saving re-homes.
+        bench_chunk = gcmd.get_int('BENCH_CHUNK', 40, minval=5, maxval=1000)
+        bench_chunk_grow = gcmd.get_float('BENCH_CHUNK_GROW', 1.5,
+                                          minval=1.0, maxval=4.0)
         # Validate (and accept) at BENCH_DERATE × the found value, not the
         # bleeding edge — fewer failures, far less likely to crash.
         bench_derate = gcmd.get_float('BENCH_DERATE', 0.9,
@@ -1115,7 +1120,8 @@ class SpeedTest:
                                  'REPEAT': repeat,
                                  'BENCH': '%d+%d' % (bench_short, bench_long),
                                  'BENCH_DERATE': bench_derate,
-                                 'BENCH_CHUNK': bench_chunk,
+                                 'BENCH_CHUNK': '%d×%.1f' % (bench_chunk,
+                                                            bench_chunk_grow),
                                  'MAX_REDO': max_redo})
         # TMC driver + run_current for the tested axis, so the report can
         # show what current the result was found at (accel scales with it).
@@ -1252,15 +1258,20 @@ class SpeedTest:
                     bench_val = cand * bench_derate
                     targets = self._build_print_sim_moves(
                         axis, bench_short, bench_long, seed)
+                    total = len(targets)
                     gcmd.respond_info(
                         "  ──── Stage 3: print simulation, %d moves at "
-                        "V=%.0f A=%.0f (%.0f%% of %.0f), chunks of %d ────"
-                        % (len(targets), v, bench_val, bench_derate * 100,
-                           cand, bench_chunk))
+                        "V=%.0f A=%.0f (%.0f%% of %.0f), sections from %d "
+                        "growing ×%.1f ────"
+                        % (total, v, bench_val, bench_derate * 100,
+                           cand, bench_chunk, bench_chunk_grow))
                     self._set_limits(velocity=v, accel=bench_val)
                     bench_failed = False
-                    for ci in range(0, len(targets), bench_chunk):
-                        sub = targets[ci:ci + bench_chunk]
+                    ci = 0
+                    chunk = bench_chunk           # current section length
+                    chunk_cap = bench_chunk * 8   # don't grow beyond this
+                    while ci < total:
+                        sub = targets[ci:ci + chunk]
                         bres = self._measure_step(
                             gcmd, [axis], 'A', bench_val,
                             lambda _s=sub: self._run_axis_moves(
@@ -1274,8 +1285,13 @@ class SpeedTest:
                             gcmd.respond_info(
                                 "  ⚠ lost steps at move %d/%d — run aborted "
                                 "(no further grinding)"
-                                % (ci + len(sub), len(targets)))
+                                % (ci + len(sub), total))
                             break
+                        ci += len(sub)
+                        # Clean section → grow the next one (fewer re-homes
+                        # as the motor proves itself).
+                        chunk = min(chunk_cap,
+                                    int(round(chunk * bench_chunk_grow)))
                     if bench_failed:
                         attempt += 1
                         hi = cand * (1.0 - backoff)

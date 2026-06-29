@@ -196,7 +196,7 @@ This test sweeps several velocities and finds the max safe accel at each, produc
 
 1. **Stage 1 — bracket.** A relative-accuracy **binary search** (no fixed step; stops when the guess is within `ACCEL_ACCU` of a bracket bound) using short, stall-safe *jab* moves. Each jab is sized to the motion profile (`V²/A`) and anchored **near home, 10 % into the travel**, so the search is fast, a stall barely grinds, and the re-home stays short. The search ends on a freshly **confirmed** passing value before handing off. (Jab idea adapted from Anonoei's [klipper_auto_speed](https://github.com/Anonoei/klipper_auto_speed).)
 2. **Stage 2 — validate.** The candidate is re-tested with the thorough reversal-stress pattern (random distances across the axis — where motors actually lose steps). Must pass, or back to stage 1 lower.
-3. **Stage 3 — simulated print.** A print-like run at `BENCH_DERATE` × the candidate: bursts of short infill zigzag + perimeter passes + travels, realistic lengths. For safety it stays in the **centre of the axis** and runs in **chunks** (`BENCH_CHUNK` moves) that re-home between them and **abort on the first lost-step chunk**, so a stall can't grind the whole run into the limit. Must pass, or back to stage 1 lower.
+3. **Stage 3 — simulated print.** A print-like run at `BENCH_DERATE` × the candidate: bursts of short infill zigzag + perimeter passes + travels, realistic lengths. For safety it stays in the **centre of the axis** and runs in **adaptive sections** that re-home between them and **abort on the first lost-step section**, so a stall can't grind the whole run into the limit. Sections start short (`BENCH_CHUNK` moves) — when a stall is most likely and grinding must stay short — and each clean section **grows the next by `BENCH_CHUNK_GROW`** (up to 8×), so checks loosen as the motor proves itself and re-homes are saved. Must pass, or back to stage 1 lower.
 
 | Parameter          | Default | Description                                  |
 | ------------------ | ------- | -------------------------------------------- |
@@ -212,7 +212,8 @@ This test sweeps several velocities and finds the max safe accel at each, produc
 | `MAX_ITERS`        | 12      | Cap on stage-1 binary-search iterations      |
 | `BENCH_SHORT`      | 400     | Stage-3 short **infill** segments            |
 | `BENCH_LONG`       | 60      | Stage-3 long **travel** moves                |
-| `BENCH_CHUNK`      | 80      | Stage-3 moves per chunk before re-home + skip-check (abort on fail) |
+| `BENCH_CHUNK`      | 40      | Stage-3 **initial** section length (moves) before re-home + skip-check |
+| `BENCH_CHUNK_GROW` | 1.5     | Each clean section grows the next by this factor (capped at 8× the initial) — tight early, looser as the motor holds |
 | `BENCH_DERATE`     | 0.9     | Stage-3 tests/accepts at this fraction of the found value — safer, fewer crashes |
 | `MAX_REDO`         | 4       | Re-determination attempts before a velocity is excluded |
 | `MAX_DIST_FACTOR`  | 4       | Upper bound for stage-2 random moves         |
@@ -225,7 +226,7 @@ The console prints the full table plus three ready-to-paste operating points —
 
 A velocity point is skipped if reaching it within the axis travel would need an accel above the search ceiling (very short axes can't reach high speeds in a triangle move) — the skip is reported so you know the curve has a gap.
 
-> **Runtime:** stage 3 is thorough — hundreds of moves per accepted value, plus a fresh run on every re-determination. For a quick first pass, lower the load, e.g. `V_POINTS=3 BENCH_SHORT=120 BENCH_LONG=20 BENCH_CHUNK=40`.
+> **Runtime:** stage 3 is thorough — hundreds of moves per accepted value, plus a fresh run on every re-determination. For a quick first pass, lower the load, e.g. `V_POINTS=3 BENCH_SHORT=120 BENCH_LONG=20`. Raising `BENCH_CHUNK_GROW` (e.g. 2.0) cuts re-homes further once the motor is proven.
 
 ### `SPEED_TEST_FIND_MAX_SCV`
 
