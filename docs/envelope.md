@@ -14,9 +14,10 @@ either unsafe at higher speeds or needlessly conservative at lower ones.
 This test sweeps several velocities and finds the max safe accel at each,
 producing the whole curve plus a balanced `max_velocity` / `max_accel`
 recommendation taken from the **knee** of the envelope (the point past which
-buying more speed costs the most acceleration). To save time, each velocity
-warm-starts its accel search from the previous (lower-velocity) result — since
-the curve only falls as velocity rises.
+buying more speed costs the most acceleration). Each velocity searches the full
+`A_MIN`…`A_MAX` range independently (the binary search costs only ~1 extra probe
+for a wider range), so the result is never capped by a neighbouring point — the
+accel limit doesn't always fall with velocity.
 
 ## Four-stage search per velocity
 
@@ -45,9 +46,12 @@ passes, that velocity is honestly **excluded** rather than reported as safe.
    plus `CURRENT_MARGIN`. Your configured `run_current` is restored at the end.
 4. **Stage 4 — final benchmark.** A print-like run **at the trimmed current** —
    the real operating point: bursts of short infill zigzag + perimeter passes +
-   travels, realistic lengths. For safety it stays in the **centre of the axis**
-   and runs in **adaptive sections** that re-home between them and **abort on
-   the first lost-step section**, so a stall can't grind the whole run into the
+   travels, realistic lengths. At least `FULLSPEED_FRAC` (default 15 %) of the
+   moves are **full-speed sweeps that actually reach the target velocity** (the
+   rest are short infill that never gets up to speed, exactly like a real
+   print). For safety the short moves stay in the **centre of the axis** and the
+   run goes in **adaptive sections** that re-home between them and **abort on the
+   first lost-step section**, so a stall can't grind the whole run into the
    limit. Sections start short (`BENCH_CHUNK` moves) and each clean one **grows
    the next by `BENCH_CHUNK_GROW`** (up to 8×), so checks loosen as the motor
    proves itself. If it fails, the **current was too low** for a sustained print
@@ -55,6 +59,18 @@ passes, that velocity is honestly **excluded** rather than reported as safe.
    current, the **accel is too high** → back to stage 1. The configured current
    is always restored afterwards; the accepted current is reported per velocity
    and saved in the CSV/HTML.
+
+### Velocity capping (accel-limited points)
+
+Deriving the accepted accel includes a safety derate (`BENCH_DERATE`), and a
+lower accel needs **more distance** to reach the target velocity (`V²/A`). If
+that exceeds the axis travel, the velocity simply **can't be reached** on this
+machine. When that happens the plugin **caps the reported velocity** to the most
+the axis can actually reach at that accel — `√(A · travel)` — instead of
+pretending the requested velocity was achieved. The console says so (`↓ accel
+reduced … velocity capped to …`), and the report shows the capped velocity with
+the originally requested one noted (`requested X, accel-limited`); the CSV adds a
+`requested_velocity_mm_s` column.
 
 ## Parameters
 
@@ -75,6 +91,7 @@ passes, that velocity is honestly **excluded** rather than reported as safe.
 | `BENCH_CHUNK`      | 40      | Stage-4 **initial** section length (moves) before re-home + skip-check |
 | `BENCH_CHUNK_GROW` | 1.5     | Each clean section grows the next by this factor (capped at 8× the initial) — tight early, looser as the motor holds |
 | `BENCH_DERATE`     | 0.9     | Accepted accel = this fraction of the stage-2 value — safer, fewer crashes |
+| `FULLSPEED_FRAC`   | 0.15    | Minimum fraction of stage-4 moves that must reach the (effective) target velocity |
 | `MAX_REDO`         | 4       | Re-determination / current-bump attempts before a velocity is excluded |
 | `FIND_CURRENT`     | 1       | Stage 3 on/off. `1` = trim current per point (needs TMC); `0` = skip |
 | `MIN_CURRENT`      | 0.3     | Lower bound of the stage-3 current search (A) |

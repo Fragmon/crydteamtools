@@ -438,31 +438,34 @@ class SpeedTest:
             self._move_to_axis(axis, low, velocity)
         self.gcode.run_script_from_command("M400")
 
-    def _build_print_sim_moves(self, axis, n_infill, n_travel, seed):
-        """Build the stage-3 'simulated print' as a list of absolute target
-        coordinates — a print-like sequence of bursts of short infill
-        zigzag (rapid reversals — the hardest stress), interleaved with
-        medium perimeter passes and travels.
+    def _build_print_sim_moves(self, axis, velocity, accel, n_infill,
+                               n_travel, seed, fullspeed_frac=0.15):
+        """Build the stage-4 'simulated print' as a list of absolute target
+        coordinates — short infill zigzag (rapid reversals, the hardest
+        stress), medium perimeter passes and travels.
 
-        Two safety choices keep a stall from crashing the head:
-          • the whole run is confined to the CENTRE of the axis, leaving a
-            generous pad at each end, so lost steps drift the head but
-            don't drive it into the axis limit, and
-          • travels are capped at that central region's width — no
-            full-axis sweeps.
-        Returned targets are executed in chunks by the caller, which
-        re-homes between chunks and aborts on the first lost-step chunk,
-        so grinding is bounded to one chunk.
+        Short/medium moves stay in the CENTRE of the axis (lost steps drift
+        but don't reach the limit; the caller bounds a stall to one chunk by
+        re-homing and aborting). At least `fullspeed_frac` of the moves are
+        full-speed sweeps that actually reach the target velocity — those
+        need the length, so they use the full usable travel.
         """
         ax_min, ax_max, ax_mid, ax_range = self._get_axis_bounds(axis)
+        rng = random.Random(seed)
+        frac = min(max(fullspeed_frac, 0.0), 0.5)
+        # Distance to reach the target velocity (triangle peak = V). The
+        # velocity is already capped to what the axis can reach, so this
+        # never exceeds the usable travel.
+        reach = min(max((velocity ** 2) / accel, 1.0), ax_range)
         pad = 0.15 * ax_range
         rmin, rmax = ax_min + pad, ax_max - pad
         region = max(10.0, rmax - rmin)
-        rng = random.Random(seed)
         short_hi = max(2.0, min(8.0, region * 0.12))
         med_lo = short_hi
         med_hi = max(med_lo + 1.0, min(40.0, region * 0.45))
         travel_lo = min(40.0, region * 0.45)
+
+        # 1. The realistic print mix (lengths, within the central region).
         lengths = []
         infill_left = int(n_infill)
         travel_left = int(n_travel)
@@ -479,20 +482,71 @@ class SpeedTest:
             if travel_left > 0 and (infill_left <= 0 or rng.random() < 0.7):
                 lengths.append(rng.uniform(travel_lo, region))
                 travel_left -= 1
-        # Bounce the lengths into absolute targets within [rmin, rmax].
+        if not lengths:
+            lengths = [reach]
+
+        # 2. Full-speed out-and-back UNITS to interleave so >= frac of all
+        #    moves reach V. Each unit adds 2 V-reaching moves + 1 reposition.
+        m = len(lengths)
+        inc = sum(1 for d in lengths if d >= reach - 1e-9)
+        units = max(0, int(math.ceil(
+            (frac * m - inc) / max(0.1, 2.0 - 3.0 * frac))))
+
+        # 3. Bounce the mix in the central region, dropping in a full-speed
+        #    sweep (full travel, length `reach`) at regular intervals.
         targets = []
-        pos = (rmin + rmax) / 2.0
-        direction = 1
-        for d in lengths:
-            d = min(d, region)
-            target = pos + direction * d
-            if target > rmax or target < rmin:
-                direction = -direction
-                target = pos + direction * d
-            target = min(max(target, rmin), rmax)
-            targets.append(target)
-            pos = target
-            direction = -direction
+        pos = ax_mid
+        direction = [1]
+
+        def bounce(d, lo_b, hi_b):
+            d = min(d, hi_b - lo_b)
+            t = pos + direction[0] * d
+            if t > hi_b or t < lo_b:
+                direction[0] = -direction[0]
+                t = pos + direction[0] * d
+            t = min(max(t, lo_b), hi_b)
+            targets.append(t)
+            direction[0] = -direction[0]
+            return t
+
+        gap = max(1, m // (units + 1)) if units else (m + 1)
+        placed = 0
+        for i, d in enumerate(lengths):
+            pos = bounce(d, rmin, rmax)
+            if placed < units and (i + 1) % gap == 0:
+                start = rng.uniform(ax_min, max(ax_min, ax_max - reach))
+                targets.append(start)            # reposition to anchor
+                targets.append(start + reach)    # full-speed move (reaches V)
+                targets.append(start)            # back (also reaches V)
+                pos = start
+                direction[0] = 1
+                placed += 1
+        while placed < units:
+            start = rng.uniform(ax_min, max(ax_min, ax_max - reach))
+            targets.append(start)
+            targets.append(start + reach)
+            targets.append(start)
+            placed += 1
+
+        # Guarantee the realized fraction. The bounce can clamp a long mix
+        # move shorter than its requested length, so the `inc`/`units`
+        # estimate above isn't sufficient on its own. Measure the ACTUAL
+        # move lengths and top up with guaranteed full-speed out-and-back
+        # sweeps (never clamped) until at least `frac` of the executed
+        # moves really reach V.
+        nreach = sum(1 for i in range(1, len(targets))
+                     if abs(targets[i] - targets[i - 1]) >= reach - 1e-9)
+        moves = max(0, len(targets) - 1)
+        guard2 = 0
+        while moves > 0 and nreach < frac * moves and guard2 < 20000:
+            guard2 += 1
+            prev = targets[-1]
+            start = rng.uniform(ax_min, max(ax_min, ax_max - reach))
+            targets.append(start)
+            targets.append(start + reach)
+            targets.append(start)
+            nreach += 2 + (1 if abs(start - prev) >= reach - 1e-9 else 0)
+            moves += 3
         return targets
 
     def _run_axis_moves(self, axis, targets, velocity, testbench=False):
@@ -1108,6 +1162,11 @@ class SpeedTest:
         bench_chunk = gcmd.get_int('BENCH_CHUNK', 40, minval=5, maxval=1000)
         bench_chunk_grow = gcmd.get_float('BENCH_CHUNK_GROW', 1.5,
                                           minval=1.0, maxval=4.0)
+        # At least this fraction of stage-4 moves must actually reach the
+        # (effective) target velocity — the rest are short infill that never
+        # gets up to speed, exactly like a real print.
+        fullspeed_frac = gcmd.get_float('FULLSPEED_FRAC', 0.15,
+                                        minval=0.0, maxval=1.0)
         # Validate (and accept) at BENCH_DERATE × the found value, not the
         # bleeding edge — fewer failures, far less likely to crash.
         bench_derate = gcmd.get_float('BENCH_DERATE', 0.9,
@@ -1190,7 +1249,6 @@ class SpeedTest:
         self._ensure_homed([axis], testbench=testbench)
         results = []
         envelope = []
-        prev_amax = None
 
         try:
             for idx, v in enumerate(v_list):
@@ -1199,19 +1257,18 @@ class SpeedTest:
                 # so A ≥ V²/range. Below that the move never hits v.
                 a_floor = (v * v) / ax_range
                 low = max(a_min, a_floor * 1.05)
-                # Warm-start the upper bound from the previous (lower-V)
-                # result — the envelope only falls as V rises, so there's
-                # no need to re-climb all the way to A_MAX every time.
-                high = a_max if prev_amax is None \
-                    else min(a_max, prev_amax * 1.3)
+                # Always search the full A_MIN..A_MAX range (the binary
+                # search costs only ~1 extra probe for a wider range). No
+                # warm-start cap — the accel limit does not always fall with
+                # velocity, and capping it underreported the real maximum.
+                high = a_max
                 if high <= low * (1.0 + accel_accu):
                     gcmd.respond_info(
                         "  ▶ V=%.0f mm/s needs accel ≥ %.0f mm/s² just to "
-                        "reach it within %.0f mm of travel, but the ceiling "
-                        "here is only %.0f (A_MAX, or the motor's accel at "
-                        "lower speeds). This velocity isn't reachable on this "
-                        "axis — skipped."
-                        % (v, low, ax_range, high))
+                        "reach it within %.0f mm of travel — above A_MAX "
+                        "(%.0f). This velocity isn't reachable on this axis "
+                        "at A_MAX; raise A_MAX or shorten the sweep. Skipped."
+                        % (v, low, ax_range, a_max))
                     continue
 
                 gcmd.respond_info(
@@ -1264,6 +1321,8 @@ class SpeedTest:
                 backoff = max(accel_accu, 0.1)
                 best = None
                 best_current = None
+                best_v = None
+                best_v_req = None
                 while attempt <= max_redo:
                     # Stage 1: search for the highest value that passes the
                     # quick jab test (None if even the floor fails).
@@ -1294,7 +1353,21 @@ class SpeedTest:
                     # Accel accepted (derated) once it survives stages 3+4.
                     accel_val = cand * bench_derate
 
-                    # Stage 3: trim run_current at (V, accel_val) from the
+                    # Reducing the accel raises the distance needed to reach V
+                    # (V²/A). If that exceeds the run length, V can't be
+                    # reached, so cap the velocity to the max the axis allows
+                    # at this accel (a full-length triangle peaks at √(A·L)).
+                    v_eff = v
+                    v_reach = math.sqrt(accel_val * ax_range)
+                    if v_reach < v - 1e-6:
+                        v_eff = v_reach
+                        gcmd.respond_info(
+                            "  ↓ accel reduced to %.0f mm/s² — %.0f mm/s no "
+                            "longer reachable within %.0f mm of travel; "
+                            "velocity capped to the max achievable %.0f mm/s."
+                            % (accel_val, v, ax_range, v_eff))
+
+                    # Stage 3: trim run_current at (v_eff, accel_val) from the
                     # ceiling (config max_current cap) downward — cooler
                     # motor. Safe by construction: short, near-home jab moves.
                     trim_cur = current_ceiling
@@ -1302,9 +1375,9 @@ class SpeedTest:
                         gcmd.respond_info(
                             "  ──── Stage 3: trim current for V=%.0f A=%.0f, "
                             "from %.3f A down ────"
-                            % (v, accel_val, current_ceiling))
+                            % (v_eff, accel_val, current_ceiling))
                         trim_cur = self._search_min_current(
-                            gcmd, results, axis, v, accel_val,
+                            gcmd, results, axis, v_eff, accel_val,
                             current_ceiling, orig_current, min_current,
                             current_accu, current_margin, max_bisect,
                             current_repeat, testbench)
@@ -1316,8 +1389,10 @@ class SpeedTest:
                     # ceiling, the accel is too high → back to stage 1.
                     gcmd.respond_info(
                         "  ──── Stage 4: final benchmark %d+%d moves at "
-                        "V=%.0f A=%.0f, current %s ────"
-                        % (bench_short, bench_long, v, accel_val,
+                        "V=%.0f A=%.0f (≥%.0f%% reach full speed), current "
+                        "%s ────"
+                        % (bench_short, bench_long, v_eff, accel_val,
+                           fullspeed_frac * 100,
                            "%.3f A" % trim_cur if do_current else "n/a"))
                     cur = trim_cur
                     bumps = 0
@@ -1333,9 +1408,9 @@ class SpeedTest:
                             if actual is not None:
                                 cur = actual
                         final_failed = self._run_print_benchmark(
-                            gcmd, results, axis, v, accel_val,
+                            gcmd, results, axis, v_eff, accel_val,
                             bench_short, bench_long, bench_chunk,
-                            bench_chunk_grow, seed, testbench)
+                            bench_chunk_grow, seed, fullspeed_frac, testbench)
                         if not final_failed:
                             break
                         if (do_current and cur < current_ceiling - 1e-6
@@ -1364,9 +1439,11 @@ class SpeedTest:
                             break
                         continue
 
-                    # Passed every stage — accept (V, accel, current).
+                    # Passed every stage — accept (v_eff, accel, current).
                     best = accel_val
                     best_current = cur if do_current else None
+                    best_v = v_eff
+                    best_v_req = v if v_eff < v - 1e-6 else None
                     if do_current:
                         self._set_run_current(axis, orig_current)
                     break
@@ -1378,14 +1455,16 @@ class SpeedTest:
                         % (v, low, attempt))
                     continue
 
-                envelope.append((v, best, best_current))
-                prev_amax = best
+                envelope.append((best_v, best, best_current, best_v_req))
                 cur_note = ("" if best_current is None
                             else "  |  run_current %.3f A (was %.3f A)"
                                  % (best_current, orig_current))
+                vreq_note = ("" if best_v_req is None
+                             else "  (requested %.0f, accel-limited)"
+                                  % best_v_req)
                 gcmd.respond_info(
-                    "  ✓ V=%.0f mm/s  →  max safe accel %.0f mm/s²%s"
-                    % (v, best, cur_note))
+                    "  ✓ V=%.0f mm/s%s  →  max safe accel %.0f mm/s²%s"
+                    % (best_v, vreq_note, best, cur_note))
         finally:
             if orig_current is not None:
                 self._set_run_current(axis, orig_current)
@@ -1402,13 +1481,13 @@ class SpeedTest:
 
     def _run_print_benchmark(self, gcmd, results, axis, velocity, accel,
                              n_infill, n_travel, chunk0, grow, seed,
-                             testbench):
+                             fullspeed_frac, testbench):
         """Run the print simulation at (velocity, accel) in growing,
         centre-of-axis sections that re-home between them and abort on the
         first lost-step section (so a stall grinds at most one section).
         Returns True if a section lost steps, else False."""
         targets = self._build_print_sim_moves(
-            axis, n_infill, n_travel, seed)
+            axis, velocity, accel, n_infill, n_travel, seed, fullspeed_frac)
         total = len(targets)
         self._set_limits(velocity=velocity, accel=accel)
         ci = 0
@@ -1528,10 +1607,16 @@ class SpeedTest:
 
         def cur_of(e):
             return e[2] if len(e) > 2 else None
+
+        def req_of(e):
+            return e[3] if len(e) > 3 else None
         has_cur = any(cur_of(e) is not None for e in envelope)
         lines = []
         for e in envelope:
-            row = "  V=%-4.0f mm/s   →   max accel %6.0f mm/s²" % (e[0], e[1])
+            row = "  V=%-4.0f mm/s" % e[0]
+            if req_of(e) is not None:
+                row += " (req %.0f, accel-limited)" % req_of(e)
+            row += "   →   max accel %6.0f mm/s²" % e[1]
             if has_cur:
                 c = cur_of(e)
                 row += ("   |   min current %s"
@@ -1598,12 +1683,17 @@ class SpeedTest:
             self._write_csv_preamble(
                 f, "Speed Test v%s — V/A ENVELOPE" % MODULE_VERSION, meta)
             f.write("# --- envelope: max safe accel + min current per "
-                    "velocity ---\n")
-            f.write("velocity_mm_s,max_accel_mm_s2,min_current_A\n")
+                    "velocity (requested_velocity set when accel-limited) "
+                    "---\n")
+            f.write("velocity_mm_s,max_accel_mm_s2,min_current_A,"
+                    "requested_velocity_mm_s\n")
             for e in sorted(envelope, key=lambda p: p[0]):
                 cur = e[2] if len(e) > 2 else None
-                f.write("%.1f,%.1f,%s\n" % (
-                    e[0], e[1], "%.3f" % cur if cur is not None else ""))
+                req = e[3] if len(e) > 3 else None
+                f.write("%.1f,%.1f,%s,%s\n" % (
+                    e[0], e[1],
+                    "%.3f" % cur if cur is not None else "",
+                    "%.1f" % req if req is not None else ""))
             f.write("# --- all measurements ---\n")
             f.write("velocity,accel,phase,failed,lost_steps,skip_axes\n")
             for r in results:
@@ -1619,6 +1709,7 @@ class SpeedTest:
         vs = [e[0] for e in envelope]
         as_ = [e[1] for e in envelope]
         curs = [e[2] if len(e) > 2 else None for e in envelope]
+        reqs = [e[3] if len(e) > 3 else None for e in envelope]
         has_cur = any(c is not None for c in curs)
         knee_i = self._find_knee(envelope)
         vk, ak = envelope[knee_i][0], envelope[knee_i][1]
@@ -1626,10 +1717,16 @@ class SpeedTest:
         knee_pts[knee_i] = ak
         meta_html = self._meta_to_html(meta)
         cur_head = "<th>Min current (A)</th>" if has_cur else ""
+
+        def vel_cell(i):
+            note = ("" if reqs[i] is None else
+                    "<br><span style=\"color:#a3791f;font-size:11px\">"
+                    "requested %.0f, accel-limited</span>" % reqs[i])
+            return "%.0f%s" % (vs[i], note)
         rows = "".join(
-            "<tr%s><td>%.0f</td><td>%.0f</td>%s</tr>"
-            % (' style="background:#fff3cd"' if i == knee_i else '',
-               e[0], e[1],
+            "<tr%s><td>%s</td><td>%.0f</td>%s</tr>"
+            % (' class="knee-row"' if i == knee_i else '',
+               vel_cell(i), e[1],
                ("<td>%s</td>" % ("%.3f" % curs[i]
                                  if curs[i] is not None else "–"))
                if has_cur else "")
@@ -1640,61 +1737,133 @@ class SpeedTest:
         cfg_scv = meta.get('printer_scv', '—')
         tmc_drv = meta.get('tmc_driver', 'none')
         tmc_cur = meta.get('tmc_run_current', '—')
+        # Knee run_current tile (only when stage 4 produced currents).
+        knee_cur = curs[knee_i] if has_cur else None
+        knee_cur_block = (
+            '<div class="kv"><b>%.2f</b><span>run_current A</span></div>'
+            % knee_cur if knee_cur is not None else '')
+        # Optional second chart line: min current on a right-hand axis.
+        if has_cur:
+            cur_dataset = (
+                ",\n    { label:'Min current (A)', data: %s, "
+                "borderColor:'#2e9e5b', backgroundColor:'rgba(46,158,91,.12)',"
+                " fill:false, tension:.25, pointRadius:4, borderDash:[5,4], "
+                "yAxisID:'y1' }"
+                % json.dumps([round(c, 3) if c is not None else None
+                              for c in curs]))
+            y1_axis = (
+                ", y1:{ position:'right', beginAtZero:true, "
+                "grid:{drawOnChartArea:false}, ticks:{color:'#2e9e5b'}, "
+                "title:{display:true, text:'Min current (A)', "
+                "color:'#2e9e5b'} }")
+        else:
+            cur_dataset = ""
+            y1_axis = ""
         tpl = """<!DOCTYPE html>
-<html><head><meta charset="UTF-8">
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Speed Test (V/A Envelope) — %(ts)s</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0"></script>
 <style>
-body { font-family: system-ui, sans-serif; max-width: 1000px;
-       margin: 20px auto; padding: 0 20px; color:#333; }
-h1 { color:#1565c0; }
-.meta { background:#f5f5f5; padding:15px; border-radius:8px;
-        margin-bottom:20px; display:grid;
-        grid-template-columns: repeat(auto-fit, minmax(220px,1fr));
-        gap:8px; font-size:14px; }
-.summary { background:#e3f2fd; padding:15px; border-radius:8px;
-           margin-bottom:20px; border-left:4px solid #1976d2; }
-.summary h2 { margin:0 0 10px 0; color:#1976d2; }
-.chart-container { background:white; padding:20px; border-radius:8px;
-                   margin-bottom:20px; box-shadow:0 2px 4px rgba(0,0,0,.1); }
-table { width:100%%; border-collapse:collapse; font-size:14px; }
-th,td { padding:8px 12px; border:1px solid #ddd; text-align:right; }
-th { background:#f5f5f5; }
-.footer { text-align:center; color:#666; padding:20px; font-size:13px; }
-.footer a { color:#1976d2; }
-.compare { background:white; padding:20px; border-radius:8px;
-           margin-bottom:20px; box-shadow:0 2px 4px rgba(0,0,0,.1); }
-.compare td:first-child, .compare th:first-child { text-align:left; }
-.compare .tmc { margin-top:12px; color:#555; font-size:14px; }
-.userfield { background:#fff8e1; border-left:4px solid #f9a825;
-             padding:14px 18px; border-radius:8px; margin-bottom:20px; }
-.userfield label { font-weight:bold; margin-right:8px; }
-.userfield input { font-size:15px; padding:6px 10px; border:1px solid #ccc;
-                   border-radius:6px; width:160px; }
-.userfield .hint { display:block; margin-top:6px; color:#777;
-                   font-size:13px; }
+:root{ --bg:#eef2f9; --card:#fff; --ink:#1f2733; --muted:#6b7787;
+  --blue:#1565c0; --blue2:#1e88e5; --orange:#fb8c00; --green:#2e9e5b;
+  --line:#e6ebf3; }
+*{ box-sizing:border-box; }
+body{ font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
+  background:var(--bg); color:var(--ink); margin:0; padding:0 16px 44px;
+  line-height:1.5; }
+.wrap{ max-width:1040px; margin:0 auto; }
+header.hero{ background:linear-gradient(135deg,#1565c0,#42a5f5); color:#fff;
+  border-radius:0 0 18px 18px; padding:26px 28px 22px; margin:0 -16px 24px;
+  box-shadow:0 8px 22px rgba(21,101,192,.28); }
+header.hero h1{ margin:0; font-size:23px; font-weight:700; letter-spacing:.2px; }
+header.hero .sub{ margin-top:7px; font-size:13.5px; opacity:.93; }
+header.hero a{ color:#fff; }
+.card{ background:var(--card); border-radius:14px; padding:20px 22px;
+  margin-bottom:20px; box-shadow:0 2px 12px rgba(20,40,80,.06);
+  border:1px solid var(--line); }
+.card h2{ margin:0 0 14px; font-size:16px; color:var(--blue); }
+.hero-knee{ background:linear-gradient(135deg,#e9f2ff,#f4f9ff);
+  border-color:#cfe0f5; }
+.kvs{ display:flex; flex-wrap:wrap; gap:14px 30px; margin:4px 0; }
+.kv{ display:flex; flex-direction:column; }
+.kv b{ font-size:30px; font-weight:700; color:var(--blue); line-height:1.05; }
+.kv span{ font-size:11px; color:var(--muted); text-transform:uppercase;
+  letter-spacing:.6px; margin-top:5px; }
+.note{ color:var(--muted); font-size:13px; margin:12px 0 0; }
+.fields{ display:flex; flex-wrap:wrap; gap:18px; }
+.field{ flex:1 1 230px; }
+.field label{ display:block; font-weight:600; font-size:13px; margin-bottom:6px; }
+.field input{ width:100%%; font-size:15px; padding:9px 12px;
+  border:1px solid #cfd6e0; border-radius:9px; background:#fbfcfe;
+  transition:border-color .15s, box-shadow .15s; }
+.field input:focus{ outline:none; border-color:var(--blue2);
+  box-shadow:0 0 0 3px rgba(30,136,229,.16); }
+.field .hint{ display:block; margin-top:6px; color:var(--muted); font-size:12px; }
+.field-card{ background:linear-gradient(135deg,#fff8e6,#fffdf6);
+  border-color:#f1e2b4; }
+table{ width:100%%; border-collapse:collapse; font-size:14px; }
+th,td{ padding:9px 12px; text-align:right; }
+td:first-child,th:first-child{ text-align:left; }
+thead th{ background:#f3f6fb; color:var(--muted); font-weight:600;
+  text-transform:uppercase; font-size:11px; letter-spacing:.5px;
+  border-bottom:2px solid var(--line); }
+tbody tr{ border-bottom:1px solid var(--line); }
+tbody tr:last-child{ border-bottom:none; }
+tbody tr:hover{ background:#f7faff; }
+tr.knee-row{ background:#fff3da; font-weight:600; }
+tr.knee-row:hover{ background:#ffeccb; }
+.tmc{ margin-top:14px; color:var(--muted); font-size:13px; }
+.meta{ display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+  gap:7px 18px; font-size:12.5px; color:var(--muted); }
+.meta b{ color:var(--ink); }
+.footer{ text-align:center; color:var(--muted); padding:14px; font-size:12px; }
+.footer a{ color:var(--blue); }
+canvas{ max-height:380px; }
 </style></head><body>
-<h1>Speed Test — Velocity / Acceleration Envelope</h1>
-<p style="color:#666;margin-top:-10px;">
-  Plugin by Steven (Fragmon) — Crydteam ·
-  <a href="https://www.youtube.com/@crydteamprinting" target="_blank">YouTube: @crydteamprinting</a></p>
-<div class="meta">%(meta_html)s</div>
-<div class="summary">
-  <h2>Recommended balanced point (knee)</h2>
-  <p>max_velocity <strong>%(vk).0f</strong> mm/s &nbsp;+&nbsp;
-     max_accel <strong>%(ak).0f</strong> mm/s²
-     <em>(raw knee value — apply your own safety margin)</em></p>
-  <p>Everything on or below the curve is safe: pick any (velocity, accel)
-     pair under the line and set <em>both</em> in printer.cfg.</p>
+<div class="wrap">
+<header class="hero">
+  <h1>&#9889; Speed Test &middot; Velocity / Acceleration Envelope</h1>
+  <div class="sub">Plugin by Steven (Fragmon) — Crydteam &middot;
+    <a href="https://www.youtube.com/@crydteamprinting" target="_blank">@crydteamprinting</a>
+    &middot; %(ts)s</div>
+</header>
+
+<div class="card hero-knee">
+  <h2>&#127919; Recommended balanced point (knee)</h2>
+  <div class="kvs">
+    <div class="kv"><b>%(vk).0f</b><span>max_velocity mm/s</span></div>
+    <div class="kv"><b>%(ak).0f</b><span>max_accel mm/s&sup2;</span></div>
+    %(knee_cur_block)s
+  </div>
+  <p class="note">Raw knee values. Everything on or below the curve is safe —
+     pick any (velocity, accel) pair under the line and set <em>both</em> in
+     printer.cfg.</p>
 </div>
-<div class="userfield">
-  <label for="thw">Toolhead weight:</label>
-  <input id="thw" type="text" placeholder="e.g. 450 g" />
-  <span class="hint">Note your moving mass — a heavier toolhead lowers the
-     safe acceleration. Saved with this report in your browser.</span>
+
+<div class="card field-card">
+  <h2>&#128221; Notes <span style="font-weight:400;color:#9a8a55;font-size:13px">(saved in this browser)</span></h2>
+  <div class="fields">
+    <div class="field">
+      <label for="thw">Toolhead weight</label>
+      <input id="thw" type="text" placeholder="e.g. 450 g" />
+      <span class="hint">Heavier toolhead &rarr; lower safe acceleration.</span>
+    </div>
+    <div class="field">
+      <label for="stp">Stepper / motor</label>
+      <input id="stp" type="text" placeholder="e.g. stepper_x &mdash; LDO-42STH48" />
+      <span class="hint">Which motor this run is for.</span>
+    </div>
+  </div>
 </div>
-<div class="compare">
-  <h2>Your config vs. this run</h2>
+
+<div class="card">
+  <h2>&#128202; Max safe acceleration vs. velocity</h2>
+  <canvas id="envChart"></canvas>
+</div>
+
+<div class="card">
+  <h2>&#9878;&#65039; Your config vs. this run</h2>
   <table><thead><tr><th>Parameter</th><th>Current printer.cfg</th>
     <th>Found here (knee, raw)</th></tr></thead><tbody>
     <tr><td>max_velocity</td><td>%(cfg_v)s</td><td>%(vk).0f mm/s</td></tr>
@@ -1706,44 +1875,53 @@ th { background:#f5f5f5; }
      run_current: <strong>%(tmc_cur)s</strong> — acceleration scales with
      current, so note it when comparing runs.</p>
 </div>
-<div class="chart-container">
-  <h2>Max safe acceleration vs. velocity</h2>
-  <canvas id="envChart"></canvas>
-</div>
-<div class="chart-container">
-  <h2>Data table</h2>
+
+<div class="card">
+  <h2>&#128203; Data table</h2>
   <table><thead><tr><th>Velocity (mm/s)</th>
-    <th>Max safe accel (mm/s²)</th>%(cur_head)s</tr></thead>
+    <th>Max safe accel (mm/s&sup2;)</th>%(cur_head)s</tr></thead>
     <tbody>%(rows)s</tbody></table>
 </div>
-<div class="footer"><p>Generated by <strong>%(plugin)s</strong> at %(ts)s</p></div>
+
+<div class="card">
+  <h2>&#9881;&#65039; Run parameters</h2>
+  <div class="meta">%(meta_html)s</div>
+</div>
+
+<div class="footer">Generated by <strong>%(plugin)s</strong> at %(ts)s</div>
+</div>
 <script>
 const vs = %(vs)s, accels = %(as)s, knee = %(knee)s;
 new Chart(document.getElementById('envChart'), {
   type:'line',
   data:{ labels: vs, datasets:[
-    { label:'Max safe accel', data: accels, borderColor:'#1976d2',
-      backgroundColor:'rgba(25,118,210,.12)', fill:true, tension:.2,
-      pointRadius:4 },
+    { label:'Max safe accel', data: accels, borderColor:'#1565c0',
+      backgroundColor:'rgba(21,101,192,.10)', fill:true, tension:.25,
+      pointRadius:4, pointBackgroundColor:'#1565c0', borderWidth:2.5 },
     { label:'Knee (balanced)', data: knee, borderColor:'#fb8c00',
-      backgroundColor:'#fb8c00', pointRadius:8, showLine:false },
+      backgroundColor:'#fb8c00', pointRadius:9, pointHoverRadius:11,
+      showLine:false }%(cur_dataset)s
   ]},
-  options:{ responsive:true,
-    scales:{ x:{ title:{display:true, text:'Velocity (mm/s)'} },
-             y:{ title:{display:true, text:'Max safe acceleration (mm/s²)'},
-                 beginAtZero:true } },
-    plugins:{ legend:{position:'top'} } },
+  options:{ responsive:true, interaction:{mode:'index',intersect:false},
+    plugins:{ legend:{position:'top', labels:{usePointStyle:true,
+      boxWidth:8, padding:16, font:{size:12}}} },
+    scales:{
+      x:{ title:{display:true, text:'Velocity (mm/s)'},
+          grid:{color:'#eef2f8'} },
+      y:{ title:{display:true, text:'Max safe acceleration (mm/s\\u00b2)'},
+          beginAtZero:true, grid:{color:'#eef2f8'} }%(y1_axis)s } },
 });
-// Persist the toolhead-weight free-text field in the browser, keyed to
-// this report so each run keeps its own value across reloads/printing.
 (function () {
-  var key = 'crydteam_thw_' + %(ts_key)s;
-  var el = document.getElementById('thw');
-  if (!el) return;
-  try { el.value = localStorage.getItem(key) || ''; } catch (e) {}
-  el.addEventListener('input', function () {
-    try { localStorage.setItem(key, el.value); } catch (e) {}
-  });
+  function persist(id) {
+    var key = 'crydteam_' + id + '_' + %(ts_key)s;
+    var el = document.getElementById(id);
+    if (!el) return;
+    try { el.value = localStorage.getItem(key) || ''; } catch (e) {}
+    el.addEventListener('input', function () {
+      try { localStorage.setItem(key, el.value); } catch (e) {}
+    });
+  }
+  persist('thw'); persist('stp');
 })();
 </script>
 </body></html>"""
@@ -1752,10 +1930,11 @@ new Chart(document.getElementById('envChart'), {
             'ts_key': json.dumps(meta.get('timestamp', '-')),
             'plugin': '%s v%s' % (MODULE_NAME, MODULE_VERSION),
             'meta_html': meta_html,
-            'vk': vk, 'ak': ak,
+            'vk': vk, 'ak': ak, 'knee_cur_block': knee_cur_block,
             'cfg_v': cfg_v, 'cfg_a': cfg_a, 'cfg_scv': cfg_scv,
             'tmc_drv': tmc_drv, 'tmc_cur': tmc_cur,
             'rows': rows, 'cur_head': cur_head,
+            'cur_dataset': cur_dataset, 'y1_axis': y1_axis,
             'vs': json.dumps([round(v, 1) for v in vs]),
             'as': json.dumps([round(a, 1) for a in as_]),
             'knee': json.dumps([round(a, 1) if a is not None else None
