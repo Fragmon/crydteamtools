@@ -1,6 +1,7 @@
 # Speed Test — Adaptive max velocity / accel / SCV detection for steppers
-# Detects skipped steps via the endstop_phase module and narrows the safe
-# limit with bracket bisection (Coarse → Bisect → Verify).
+# Detects skipped steps by reading the stepper MCU position directly
+# (no endstop_phase module needed) and narrows the safe limit with
+# adaptive bracket search.
 #
 # Plugin by Steven (Fragmon) — Crydteam
 # YouTube: https://www.youtube.com/@crydteamprinting
@@ -11,7 +12,6 @@ import logging
 import math
 import os
 import random
-import statistics
 import time
 import json
 
@@ -40,6 +40,11 @@ class SpeedTest:
         self.margin = config.getfloat('margin', 20.0, above=0.)
         self.z_pos = config.getfloat('z_pos', 20.0, minval=0.)
         self.monitor_tmc = config.getboolean('monitor_tmc', True)
+        # Skipped-step tolerance, in FULL motor steps. A move is a "skip"
+        # when the stepper's MCU position shifts by more than this across a
+        # re-home. ~1 step of homing jitter is normal without endstop_phase,
+        # so the default leaves headroom; real stalls lose far more.
+        self.max_missed = config.getfloat('max_missed', 1.5, above=0.)
         # Testbench mode: only X-stepper connected, no Y, no Z. Skips all
         # Y/Z homing and ignores Y in skip checks and TMC monitoring.
         # Per-command TESTBENCH=1/0 override is honored.
@@ -62,7 +67,6 @@ class SpeedTest:
         self._sample_buf = {}           # axis -> list[int]
         self._sampling_active = False
         self._sample_timer = None
-        self._sample_start = 0.0
         self._sample_axes = []
 
         self.gcode.register_command(
@@ -161,10 +165,7 @@ class SpeedTest:
         if testbench:
             # Only home X — no Y, no Z. Useful for bench setups with a
             # single stepper hooked up to X.
-            if 'x' not in homed:
-                self.gcode.run_script_from_command("G28 X")
-            else:
-                self.gcode.run_script_from_command("G28 X")
+            self.gcode.run_script_from_command("G28 X")
             return
 
         if self.structure == 'corexy':
@@ -188,23 +189,19 @@ class SpeedTest:
             "G28 " + " ".join(axes))
 
     def _read_mcu_pos(self, axis):
-        ep = self.printer.lookup_object('endstop_phase', None)
-        if ep is None:
-            return None
+        """Read the stepper's raw MCU step position straight from the
+        kinematics — no endstop_phase needed. Each unit is one microstep,
+        so a full motor step = `microsteps` units."""
         try:
-            status = ep.get_status(self.reactor.monotonic())
+            toolhead = self.printer.lookup_object('toolhead')
+            kin = toolhead.get_kinematics()
+            stepper_name = 'stepper_' + axis.lower()
+            for s in kin.get_steppers():
+                if s.get_name() == stepper_name:
+                    return s.get_mcu_position()
         except Exception:
             return None
-        last_home = status.get('last_home', {}) if isinstance(status, dict) \
-            else getattr(ep, 'last_home', {})
-        stepper_name = 'stepper_' + axis.lower()
-        data = last_home.get(stepper_name) if isinstance(last_home, dict) \
-            else getattr(last_home, stepper_name, None)
-        if data is None:
-            return None
-        if isinstance(data, dict):
-            return data.get('mcu_position')
-        return getattr(data, 'mcu_position', None)
+        return None
 
     def _store_mcu_pos(self, axes):
         for axis in axes:
@@ -213,7 +210,14 @@ class SpeedTest:
                 self._last_mcu_pos[axis] = pos
 
     def _check_skip(self, axes):
-        """Returns list of (axis, abs_diff) for axes that lost steps."""
+        """Returns list of (axis, abs_diff) for axes that lost steps.
+
+        Compares the stepper MCU position before/after a re-home. A shift
+        larger than max_missed full steps (converted to microsteps) is a
+        skip. Reading the position directly avoids the endstop_phase
+        module, which aborts homing with 'incorrect phase' the moment a
+        step is lost — exactly what we want to measure, not crash on.
+        """
         skips = []
         for axis in axes:
             new_pos = self._read_mcu_pos(axis)
@@ -221,20 +225,30 @@ class SpeedTest:
             if new_pos is None or old_pos is None:
                 continue
             diff = abs(new_pos - old_pos)
-            threshold = self._get_microsteps(axis)
+            threshold = self.max_missed * self._get_microsteps(axis)
             if diff > threshold:
                 skips.append((axis, diff))
             self._last_mcu_pos[axis] = new_pos
         return skips
 
-    def _check_endstop_phase(self):
+    def _check_ready(self):
+        # Skip detection reads the stepper MCU position directly, so no
+        # endstop_phase module is required. If it IS loaded, warn: it
+        # aborts homing with "incorrect phase" as soon as the motor loses
+        # a step (its TMC phase cross-check), which kills the test.
         ep = self.printer.lookup_object('endstop_phase', None)
-        if ep is None:
+        if ep is not None:
+            self.gcode.respond_info(
+                "speed_test: WARNING — [endstop_phase] is configured. It "
+                "aborts homing with 'incorrect phase' the moment the motor "
+                "loses a step, which will abort this test. Remove "
+                "[endstop_phase] (and any [endstop_phase stepper_*]) from "
+                "printer.cfg and FIRMWARE_RESTART.")
+        if self._read_mcu_pos(self.default_axis) is None:
             raise self.gcode.error(
-                "speed_test: [endstop_phase] module not configured.\n"
-                "Add this to your printer.cfg:\n"
-                "  [endstop_phase]\n"
-                "After FIRMWARE_RESTART, run the test again.")
+                "speed_test: cannot read the %s stepper MCU position. "
+                "Check that stepper_%s exists and the printer is configured."
+                % (self.default_axis, self.default_axis.lower()))
 
     # ─── TMC monitoring (optional) ────────────────────────────────────
 
@@ -272,7 +286,6 @@ class SpeedTest:
             return
         self._sample_axes = list(axes)
         self._sample_buf = {ax: [] for ax in axes}
-        self._sample_start = self.reactor.monotonic()
         self._sampling_active = True
         self._sample_timer = self.reactor.register_timer(
             self._tmc_sample_cb, self.reactor.NOW)
@@ -309,31 +322,29 @@ class SpeedTest:
 
     def _move_to_axis(self, axis, pos, feed_mm_s):
         feed = max(60., feed_mm_s * 60.)
-        if axis == 'X':
-            self.gcode.run_script_from_command(
-                "G1 X%.3f F%.1f" % (pos, feed))
+        self.gcode.run_script_from_command(
+            "G1 %s%.3f F%.1f" % (axis, pos, feed))
+
+    def _park_with_zlift(self, axis, pos, velocity, testbench):
+        """Park the toolhead at `pos` on `axis`. In testbench mode this is
+        a plain axis move (no Z motor); otherwise it lifts Z to z_pos while
+        moving. The Z-lift arm uses raw velocity*60 (no 60 mm/min floor),
+        matching the original inline behaviour."""
+        if testbench:
+            self._move_to_axis(axis, pos, velocity)
         else:
             self.gcode.run_script_from_command(
-                "G1 Y%.3f F%.1f" % (pos, feed))
+                "G1 %s%.3f Z%.3f F%.1f"
+                % (axis, pos, self.z_pos, velocity * 60.))
 
     def _do_velocity_pattern(self, axis, velocity, distance, repeat,
                              testbench=False):
         ax_min, ax_max, ax_mid, ax_range = self._get_axis_bounds(axis)
         dist = min(distance, ax_range)
-        feed = velocity * 60.
         low = ax_mid - dist / 2.0
         high = ax_mid + dist / 2.0
         # Park at middle first — skip Z in testbench mode (no Z motor)
-        if testbench:
-            self._move_to_axis(axis, ax_mid, velocity)
-        elif axis == 'X':
-            self.gcode.run_script_from_command(
-                "G1 X%.3f Z%.3f F%.1f"
-                % (ax_mid, self.z_pos, feed))
-        else:
-            self.gcode.run_script_from_command(
-                "G1 Y%.3f Z%.3f F%.1f"
-                % (ax_mid, self.z_pos, feed))
+        self._park_with_zlift(axis, ax_mid, velocity, testbench)
         for _ in range(repeat):
             self._move_to_axis(axis, low, velocity)
             self._move_to_axis(axis, high, velocity)
@@ -353,26 +364,15 @@ class SpeedTest:
         more short moves, fewer long ones).
 
         Each move also starts at a random offset along the axis so the
-        endstop_phase check sees varied positions, not a tight loop on
-        the same coordinate.
+        test covers varied positions, not a tight loop on the same
+        coordinate.
         """
         ax_min, ax_max, ax_mid, ax_range = self._get_axis_bounds(axis)
 
         rng = random.Random(seed)
 
         # Park at middle first — skip Z in testbench mode
-        if testbench:
-            self._move_to_axis(axis, ax_mid, velocity)
-        else:
-            feed = velocity * 60.
-            if axis == 'X':
-                self.gcode.run_script_from_command(
-                    "G1 X%.3f Z%.3f F%.1f"
-                    % (ax_mid, self.z_pos, feed))
-            else:
-                self.gcode.run_script_from_command(
-                    "G1 Y%.3f Z%.3f F%.1f"
-                    % (ax_mid, self.z_pos, feed))
+        self._park_with_zlift(axis, ax_mid, velocity, testbench)
 
         # Clamp distance bounds to axis range and sanity-check
         max_dist = min(max_dist, ax_range)
@@ -394,6 +394,117 @@ class SpeedTest:
             self._move_to_axis(axis, low, velocity)
             self._move_to_axis(axis, high, velocity)
             self._move_to_axis(axis, ax_mid, velocity)
+        self.gcode.run_script_from_command("M400")
+
+    def _do_jab_pattern(self, axis, velocity, accel, repeat,
+                        testbench=False):
+        """Stage-1 fast, stall-safe 'jab' move (idea from Anonoei's
+        klipper_auto_speed).
+
+        The move length is sized to the motion profile — V²/A, the
+        triangle distance that just reaches the target velocity at its
+        peak — and anchored near the home end (10 % into the usable
+        travel). Three wins over a full-axis sweep:
+          • each test is short, so the bracketing search is fast,
+          • a stalled motor only grinds that short distance before the
+            commanded move ends, instead of being driven across the whole
+            axis into the limit, and
+          • sitting near home keeps the approach and the re-home after
+            each test short, instead of driving out to the far axis end
+            and back every time.
+
+        It's a quick out-and-back (reversal at both turns for some stress)
+        running from the 10 % point toward the far end and back — used
+        only to bracket the limit. The thorough reversal-stress pattern
+        validates the final value in stage 2.
+        """
+        ax_min, ax_max, ax_mid, ax_range = self._get_axis_bounds(axis)
+        # Triangle distance that just touches V at the peak: V²/A.
+        dist = (velocity ** 2) / accel
+        dist = max(5.0, min(dist, ax_range))
+        # Anchor near home: start 10 % into the usable travel and jab
+        # toward the far end (away from the home limit), then back. Short
+        # approach + short re-home. For a large jab that wouldn't fit from
+        # the 10 % mark, shift it down just enough to stay on the axis.
+        low = ax_min + 0.10 * ax_range
+        high = low + dist
+        if high > ax_max:
+            high = ax_max
+            low = max(ax_min, high - dist)
+        # Park at the near (home-side) point first — skip Z in testbench.
+        self._park_with_zlift(axis, low, velocity, testbench)
+        for _ in range(repeat):
+            self._move_to_axis(axis, high, velocity)
+            self._move_to_axis(axis, low, velocity)
+        self.gcode.run_script_from_command("M400")
+
+    def _build_print_sim_moves(self, axis, n_infill, n_travel, seed):
+        """Build the stage-3 'simulated print' as a list of absolute target
+        coordinates — a print-like sequence of bursts of short infill
+        zigzag (rapid reversals — the hardest stress), interleaved with
+        medium perimeter passes and travels.
+
+        Two safety choices keep a stall from crashing the head:
+          • the whole run is confined to the CENTRE of the axis, leaving a
+            generous pad at each end, so lost steps drift the head but
+            don't drive it into the axis limit, and
+          • travels are capped at that central region's width — no
+            full-axis sweeps.
+        Returned targets are executed in chunks by the caller, which
+        re-homes between chunks and aborts on the first lost-step chunk,
+        so grinding is bounded to one chunk.
+        """
+        ax_min, ax_max, ax_mid, ax_range = self._get_axis_bounds(axis)
+        pad = 0.15 * ax_range
+        rmin, rmax = ax_min + pad, ax_max - pad
+        region = max(10.0, rmax - rmin)
+        rng = random.Random(seed)
+        short_hi = max(2.0, min(8.0, region * 0.12))
+        med_lo = short_hi
+        med_hi = max(med_lo + 1.0, min(40.0, region * 0.45))
+        travel_lo = min(40.0, region * 0.45)
+        lengths = []
+        infill_left = int(n_infill)
+        travel_left = int(n_travel)
+        guard = 0
+        while (infill_left > 0 or travel_left > 0) and guard < 100000:
+            guard += 1
+            for _ in range(rng.randint(2, 4)):
+                lengths.append(rng.uniform(med_lo, med_hi))
+            if infill_left > 0:
+                burst = min(infill_left, rng.randint(15, 40))
+                for _ in range(burst):
+                    lengths.append(rng.uniform(1.0, short_hi))
+                infill_left -= burst
+            if travel_left > 0 and (infill_left <= 0 or rng.random() < 0.7):
+                lengths.append(rng.uniform(travel_lo, region))
+                travel_left -= 1
+        # Bounce the lengths into absolute targets within [rmin, rmax].
+        targets = []
+        pos = (rmin + rmax) / 2.0
+        direction = 1
+        for d in lengths:
+            d = min(d, region)
+            target = pos + direction * d
+            if target > rmax or target < rmin:
+                direction = -direction
+                target = pos + direction * d
+            target = min(max(target, rmin), rmax)
+            targets.append(target)
+            pos = target
+            direction = -direction
+        return targets
+
+    def _run_axis_moves(self, axis, targets, velocity, testbench=False):
+        """Execute a list of absolute target coordinates on one axis. The
+        first move lifts Z (non-testbench) so the run clears the bed."""
+        first = True
+        for t in targets:
+            if first:
+                self._park_with_zlift(axis, t, velocity, testbench)
+            else:
+                self._move_to_axis(axis, t, velocity)
+            first = False
         self.gcode.run_script_from_command("M400")
 
     def _do_scv_pattern(self, speed, corner_size, repeat):
@@ -515,13 +626,14 @@ class SpeedTest:
         if cf is not None:
             cruise_str = " | cruise=%.0f%%" % (cf * 100)
             self._last_cruise_fraction = None
+        v_cur, a_cur, scv_cur = self._current_limits()
         gcmd.respond_info(
-            "  %s = %.1f  →  %s%s%s"
+            "  %s = %.1f  →  %s%s | accel=%.0f velo=%.0f scv=%.1f"
             % (label, value,
                "FAILED (%d steps on %s)" % (max_diff, skip_axes)
                if failed else "OK",
                cruise_str,
-               self._format_tmc(tmc_stats)))
+               a_cur, v_cur, scv_cur))
 
         return {
             'value': value,
@@ -531,13 +643,15 @@ class SpeedTest:
             'tmc': tmc_stats,
         }
 
-    def _format_tmc(self, tmc_stats):
-        parts = []
-        for ax, s in tmc_stats.items():
-            if s is None:
-                continue
-            parts.append("%s SG min=%d med=%d" % (ax, s['min'], s['median']))
-        return " | " + " | ".join(parts) if parts else ""
+    def _current_limits(self):
+        """Live motion limits from the toolhead — reflects the
+        SET_VELOCITY_LIMIT values active during the current test."""
+        try:
+            th = self.printer.lookup_object('toolhead')
+            return (th.max_velocity, th.max_accel,
+                    th.square_corner_velocity)
+        except Exception:
+            return self._get_printer_limits()
 
     # ─── Generic adaptive bisection ───────────────────────────────────
 
@@ -623,20 +737,98 @@ class SpeedTest:
 
         return low, last_fail_reason, results
 
+    def _binary_search_max(self, gcmd, results, low_bound, high_bound,
+                           accuracy, max_iter, label, measure_at):
+        """Relative-accuracy binary search (adapted from Anonoei's
+        klipper_auto_speed) — no fixed step size.
+
+        Probes the first guess at 1/3 of the bracket (biased low for
+        safety), then bisects: a passing value raises the floor, a failing
+        one lowers the ceiling. Stops when the last guess is within
+        `accuracy` (a fraction, e.g. 0.05 = 5%) of a bracket bound, so the
+        resolution scales with the magnitude instead of an absolute step.
+
+        measure_at(value, phase) is called with phase='search' (the caller
+        uses that to pick the fast stall-safe pattern). After bracketing,
+        the candidate is re-tested so the returned value's most recent
+        result is always a PASS. Returns that freshly-confirmed value — or
+        None if nothing in the bracket can be confirmed (so the caller
+        never treats an untested or just-failed value as safe).
+        """
+        low = low_bound
+        high = high_bound
+        guess = low + (high - low) / 3.0
+        last_pass = None
+        measured = None
+        it = 0
+        while it < max_iter:
+            it += 1
+            r = measure_at(guess, 'search')
+            results.append(r)
+            valid = not r['failed']
+            if valid:
+                last_pass = guess if last_pass is None else max(last_pass,
+                                                                guess)
+            # Converged when the guess sits within `accuracy` of the
+            # bracket — checked against the bounds BEFORE this result
+            # narrows them (skipped on the very first probe).
+            converged = (measured is not None
+                         and (guess * (1.0 + accuracy) > high
+                              or guess * (1.0 - accuracy) < low))
+            measured = guess
+            if valid:
+                low = guess
+            else:
+                high = guess
+            gcmd.respond_info(
+                "  >>> %s=%.1f %s → bracket [%.0f, %.0f] (%d/%d)"
+                % (label, guess, "OK" if valid else "FAIL",
+                   low, high, it, max_iter))
+            if converged:
+                break
+            guess = (low + high) / 2.0
+        # The bracketing may have ended on a FAILING probe, leaving the
+        # best passing value untested for a couple of steps. Confirm the
+        # candidate with a fresh test so the value handed to stage 2 was
+        # JUST validated — never one whose most recent result was a fail.
+        # If it can't be confirmed, step down until one passes (or give up
+        # → None, so the caller never treats an unconfirmed value as safe).
+        cand = last_pass if last_pass is not None else low_bound
+        tries = 0
+        while tries < max_iter:
+            tries += 1
+            r = measure_at(cand, 'search')
+            results.append(r)
+            gcmd.respond_info(
+                "  >>> %s=%.1f %s (confirm)"
+                % (label, cand, "OK" if not r['failed'] else "FAIL"))
+            if not r['failed']:
+                return cand
+            cand = cand * (1.0 - max(accuracy, 0.05))
+            if cand < low_bound:
+                break
+        return None
+
     # ─── Commands ─────────────────────────────────────────────────────
 
-    def cmd_FIND_MAX_VELOCITY(self, gcmd):
-        self._check_endstop_phase()
+    def _parse_testbench_axis(self, gcmd,
+                              tb_note=" (single stepper wired to X)."):
+        """Shared prologue for the per-axis commands: resolve TESTBENCH and
+        AXIS, and validate (testbench ⇒ X only; axis ∈ {X, Y}). `tb_note`
+        tailors the testbench error message per command."""
         testbench = bool(gcmd.get_int(
             'TESTBENCH', 1 if self.testbench_default else 0,
             minval=0, maxval=1))
         axis = gcmd.get('AXIS', self.default_axis).upper()
         if testbench and axis != 'X':
-            raise gcmd.error(
-                "Testbench mode supports AXIS=X only "
-                "(single stepper wired to X).")
+            raise gcmd.error("Testbench mode supports AXIS=X only" + tb_note)
         if axis not in ('X', 'Y'):
             raise gcmd.error("AXIS must be X or Y")
+        return testbench, axis
+
+    def cmd_FIND_MAX_VELOCITY(self, gcmd):
+        self._check_ready()
+        testbench, axis = self._parse_testbench_axis(gcmd)
         min_v = gcmd.get_float('MIN', 50.0, above=0.)
         max_v = gcmd.get_float('MAX', 500.0, above=min_v)
         coarse = gcmd.get_float('COARSE_STEP', 25.0, above=0.)
@@ -738,17 +930,8 @@ class SpeedTest:
                           no_html, 'velocity', gcmd)
 
     def cmd_FIND_MAX_ACCEL(self, gcmd):
-        self._check_endstop_phase()
-        testbench = bool(gcmd.get_int(
-            'TESTBENCH', 1 if self.testbench_default else 0,
-            minval=0, maxval=1))
-        axis = gcmd.get('AXIS', self.default_axis).upper()
-        if testbench and axis != 'X':
-            raise gcmd.error(
-                "Testbench mode supports AXIS=X only "
-                "(single stepper wired to X).")
-        if axis not in ('X', 'Y'):
-            raise gcmd.error("AXIS must be X or Y")
+        self._check_ready()
+        testbench, axis = self._parse_testbench_axis(gcmd)
         min_a = gcmd.get_float('MIN', 500.0, above=0.)
         max_a = gcmd.get_float('MAX', 50000.0, above=min_a)
         coarse = gcmd.get_float('COARSE_STEP', 2500.0, above=0.)
@@ -862,32 +1045,61 @@ class SpeedTest:
         This test sweeps several velocities and finds the max safe accel
         at each, producing the whole envelope plus a balanced
         max_velocity / max_accel recommendation (the knee of the curve).
+
+        Three-stage per velocity:
+          • Stage 1 brackets the limit with a relative-accuracy binary
+            search (no fixed step) using short, stall-safe 'jab' moves
+            (V²/A long, anchored near home) — fast, and a stall barely
+            grinds.
+          • Stage 2 validates the found value with the thorough
+            reversal-stress pattern across the axis.
+          • Stage 3 runs a simulated print (BENCH_SHORT infill + BENCH_LONG
+            travels, realistic lengths) at BENCH_DERATE × the found value.
+            It stays in the centre of the axis and runs in chunks that
+            re-home between them and abort on the first lost-step chunk, so
+            a stall can't grind the whole sequence into the limit.
+
+        A value is only accepted once it passes ALL THREE stages. If
+        stage 2 or stage 3 fails it goes back to stage 1 with a lowered
+        ceiling (up to MAX_REDO attempts) — it never backs off and accepts
+        a failing value. If no value clears every stage, the velocity is
+        excluded from the envelope rather than reported as safe.
         """
-        self._check_endstop_phase()
-        testbench = bool(gcmd.get_int(
-            'TESTBENCH', 1 if self.testbench_default else 0,
-            minval=0, maxval=1))
-        axis = gcmd.get('AXIS', self.default_axis).upper()
-        if testbench and axis != 'X':
-            raise gcmd.error(
-                "Testbench mode supports AXIS=X only "
-                "(single stepper wired to X).")
-        if axis not in ('X', 'Y'):
-            raise gcmd.error("AXIS must be X or Y")
+        self._check_ready()
+        testbench, axis = self._parse_testbench_axis(gcmd)
         v_min = gcmd.get_float('V_MIN', 100.0, above=0.)
         v_max = gcmd.get_float('V_MAX', 500.0, above=v_min)
         v_points = gcmd.get_int('V_POINTS', 5, minval=2, maxval=12)
         a_min = gcmd.get_float('A_MIN', 1000.0, above=0.)
         a_max = gcmd.get_float('A_MAX', 50000.0, above=a_min)
-        min_step = gcmd.get_float('MIN_STEP', 250.0, above=0.)
+        # Relative-accuracy binary search (no fixed step). Stop when the
+        # guess is within ACCEL_ACCU of a bracket bound — resolution scales
+        # with the value instead of an absolute MIN_STEP.
+        accel_accu = gcmd.get_float('ACCEL_ACCU', 0.05, above=0., below=1.)
         repeat = gcmd.get_int('REPEAT', 15, minval=1, maxval=100)
         verify_repeats = gcmd.get_int('VERIFY_REPEATS', 30,
                                       minval=1, maxval=200)
-        max_bisect = gcmd.get_int('MAX_BISECT_STEPS', 5, minval=2, maxval=15)
+        max_bisect = gcmd.get_int('MAX_ITERS', 12, minval=3, maxval=25)
         max_dist_factor = gcmd.get_float('MAX_DIST_FACTOR', 4.0, minval=1.)
         short_bias = gcmd.get_float('SHORT_BIAS', 2.0, minval=1., maxval=5.)
         seed = gcmd.get_int('SEED', 12345)
         no_html = gcmd.get_int('NO_HTML', 0, minval=0, maxval=1)
+        # Stage 3: simulated-print benchmark per found value — bursts of
+        # short infill zigzag + perimeters + travels at realistic lengths.
+        # If it fails, the value is re-determined at a lower ceiling, up to
+        # MAX_REDO times. BENCH_SHORT = infill segments, BENCH_LONG =
+        # travel moves.
+        bench_short = gcmd.get_int('BENCH_SHORT', 400, minval=0, maxval=5000)
+        bench_long = gcmd.get_int('BENCH_LONG', 60, minval=0, maxval=2000)
+        # Benchmark in chunks: re-home + skip-check every BENCH_CHUNK moves
+        # and abort on the first failing chunk, so a stall grinds at most
+        # one chunk instead of the whole run.
+        bench_chunk = gcmd.get_int('BENCH_CHUNK', 80, minval=10, maxval=1000)
+        # Validate (and accept) at BENCH_DERATE × the found value, not the
+        # bleeding edge — fewer failures, far less likely to crash.
+        bench_derate = gcmd.get_float('BENCH_DERATE', 0.9,
+                                      minval=0.5, maxval=1.0)
+        max_redo = gcmd.get_int('MAX_REDO', 4, minval=0, maxval=10)
 
         ax_min, ax_max, ax_mid, ax_range = self._get_axis_bounds(axis)
 
@@ -899,8 +1111,20 @@ class SpeedTest:
         meta = self._build_meta('ENVELOPE', axis,
                                 {'V_MIN': v_min, 'V_MAX': v_max,
                                  'V_POINTS': v_points, 'A_MIN': a_min,
-                                 'A_MAX': a_max, 'MIN_STEP': min_step,
-                                 'REPEAT': repeat})
+                                 'A_MAX': a_max, 'ACCEL_ACCU': accel_accu,
+                                 'REPEAT': repeat,
+                                 'BENCH': '%d+%d' % (bench_short, bench_long),
+                                 'BENCH_DERATE': bench_derate,
+                                 'BENCH_CHUNK': bench_chunk,
+                                 'MAX_REDO': max_redo})
+        # TMC driver + run_current for the tested axis, so the report can
+        # show what current the result was found at (accel scales with it).
+        tmc_info = self._lookup_tmc_for_axis(axis)
+        if tmc_info is not None:
+            cur = self._read_run_current(axis)
+            meta['tmc_driver'] = tmc_info[0]
+            meta['tmc_run_current'] = (
+                '%.3f A' % cur if cur is not None else 'unknown')
         gcmd.respond_info(
             "===== Speed Test v%s — V/A ENVELOPE on %s =====\n"
             "Plugin by Steven (Fragmon) — Crydteam\n"
@@ -908,10 +1132,14 @@ class SpeedTest:
             "accel at each.\n"
             "Why combined: motor torque drops as speed rises, so max accel "
             "depends on velocity.\n"
+            "Stage 1: fast jab bracket. Stage 2: reversal-stress validate. "
+            "Stage 3: simulated print (%d+%d moves, %.0f%% derate, chunked, "
+            "centre-of-axis) — redo on fail.\n"
             "Usable %s travel: %.0f mm | %d moves/step\n"
             "================================================"
-            % (MODULE_VERSION, axis, v_points, v_min, v_max, axis,
-               ax_range, repeat))
+            % (MODULE_VERSION, axis, v_points, v_min, v_max,
+               bench_short, bench_long, bench_derate * 100,
+               axis, ax_range, repeat))
 
         self._set_limits(velocity=v_max * 1.2, accel=a_max)
         self._ensure_homed([axis], testbench=testbench)
@@ -926,21 +1154,20 @@ class SpeedTest:
                 # so A ≥ V²/range. Below that the move never hits v.
                 a_floor = (v * v) / ax_range
                 low = max(a_min, a_floor * 1.05)
-                low = math.ceil(low / min_step) * min_step
                 # Warm-start the upper bound from the previous (lower-V)
                 # result — the envelope only falls as V rises, so there's
                 # no need to re-climb all the way to A_MAX every time.
                 high = a_max if prev_amax is None \
                     else min(a_max, prev_amax * 1.3)
-                if high <= low + min_step:
+                if high <= low * (1.0 + accel_accu):
                     gcmd.respond_info(
                         "  ▶ V=%.0f mm/s needs accel ≥ %.0f mm/s² just to "
-                        "reach this speed within %.0f mm of travel — that's "
-                        "above A_MAX (%.0f). Skipped."
-                        % (v, low, ax_range, a_max))
+                        "reach it within %.0f mm of travel, but the ceiling "
+                        "here is only %.0f (A_MAX, or the motor's accel at "
+                        "lower speeds). This velocity isn't reachable on this "
+                        "axis — skipped."
+                        % (v, low, ax_range, high))
                     continue
-                # Keep the coarse climb to ~6 steps regardless of bracket.
-                coarse = max(min_step * 2.0, (high - low) / 6.0)
 
                 gcmd.respond_info(
                     "\n──────── V=%.0f mm/s (%d/%d) — max accel in "
@@ -949,35 +1176,134 @@ class SpeedTest:
 
                 def measure_at(accel, phase, _v=v):
                     self._set_limits(velocity=_v, accel=accel)
-                    reps = verify_repeats if phase == 'verify' else repeat
-                    triangle = (_v * _v) / accel
-                    min_dist = triangle
-                    max_dist = min(max_dist_factor * triangle, ax_range)
-                    if max_dist < min_dist:
-                        max_dist = min_dist
-                    mean_dist = (min_dist
-                                 + (max_dist - min_dist) / (short_bias + 1.0))
-                    mean_cruise = max(0.0, 1.0 - triangle / mean_dist)
-                    r = self._measure_step(
-                        gcmd, [axis], 'A', accel,
-                        lambda: self._do_accel_pattern(
-                            axis, _v, min_dist, max_dist, reps,
-                            seed=seed + int(accel), testbench=testbench,
-                            short_bias=short_bias),
-                        testbench=testbench, cruise_fraction=mean_cruise)
+                    if phase == 'verify':
+                        # Stage 2: validate the value the fast search found
+                        # with the thorough reversal-stress pattern (random
+                        # distances across the axis — the real accel killer).
+                        triangle = (_v * _v) / accel
+                        min_dist = triangle
+                        max_dist = min(max_dist_factor * triangle, ax_range)
+                        if max_dist < min_dist:
+                            max_dist = min_dist
+                        mean_dist = (min_dist + (max_dist - min_dist)
+                                     / (short_bias + 1.0))
+                        mean_cruise = max(0.0, 1.0 - triangle / mean_dist)
+                        r = self._measure_step(
+                            gcmd, [axis], 'A', accel,
+                            lambda: self._do_accel_pattern(
+                                axis, _v, min_dist, max_dist, verify_repeats,
+                                seed=seed + int(accel), testbench=testbench,
+                                short_bias=short_bias),
+                            testbench=testbench, cruise_fraction=mean_cruise)
+                    else:
+                        # Stage 1: fast, stall-safe jab moves bracket the
+                        # limit quickly with minimal grinding on a stall.
+                        r = self._measure_step(
+                            gcmd, [axis], 'A', accel,
+                            lambda: self._do_jab_pattern(
+                                axis, _v, accel, repeat, testbench=testbench),
+                            testbench=testbench)
                     r['phase'] = phase
                     r['velocity'] = _v
                     r['accel'] = accel
                     return r
 
-                safe, _reason, _ = self._adaptive_find_max(
-                    gcmd, results, low, high, coarse, min_step,
-                    verify_repeats, max_bisect, 'A', measure_at)
-                envelope.append((v, safe))
-                prev_amax = safe
+                # Rigorous staged search. A value is only accepted once it
+                # passes ALL THREE stages. ANY stage failing sends it back
+                # to stage 1 with a lowered ceiling — it never just backs
+                # off and accepts a failing value. `best` stays None until
+                # a value clears every stage; if none does, the point is
+                # honestly excluded from the envelope.
+                hi = high
+                attempt = 0
+                backoff = max(accel_accu, 0.1)
+                best = None
+                while attempt <= max_redo:
+                    # Stage 1: search for the highest value that passes the
+                    # quick jab test (None if even the floor fails).
+                    cand = self._binary_search_max(
+                        gcmd, results, low, hi, accel_accu, max_bisect,
+                        'A', measure_at)
+                    if cand is None:
+                        gcmd.respond_info(
+                            "  ✗ V=%.0f mm/s: no accel in [%.0f, %.0f] passes "
+                            "even the quick search." % (v, low, hi))
+                        break
+
+                    # Stage 2: thorough reversal-stress validation must pass.
+                    vres = measure_at(cand, 'verify')
+                    vres['phase'] = 'verify'
+                    results.append(vres)
+                    if vres.get('failed'):
+                        attempt += 1
+                        hi = cand * (1.0 - backoff)
+                        gcmd.respond_info(
+                            "  ↻ Stage 2 FAILED at A=%.0f → back to stage 1 "
+                            "below %.0f (attempt %d/%d)"
+                            % (cand, hi, attempt, max_redo))
+                        if hi <= low:
+                            break
+                        continue
+
+                    # Stage 3: simulated-print benchmark must pass. Tested at
+                    # a slightly derated value (safer, fewer crashes), run in
+                    # chunks that re-home between them and abort on the first
+                    # lost-step chunk — so a stall grinds at most one chunk.
+                    bench_val = cand * bench_derate
+                    targets = self._build_print_sim_moves(
+                        axis, bench_short, bench_long, seed)
+                    gcmd.respond_info(
+                        "  ──── Stage 3: print simulation, %d moves at "
+                        "V=%.0f A=%.0f (%.0f%% of %.0f), chunks of %d ────"
+                        % (len(targets), v, bench_val, bench_derate * 100,
+                           cand, bench_chunk))
+                    self._set_limits(velocity=v, accel=bench_val)
+                    bench_failed = False
+                    for ci in range(0, len(targets), bench_chunk):
+                        sub = targets[ci:ci + bench_chunk]
+                        bres = self._measure_step(
+                            gcmd, [axis], 'A', bench_val,
+                            lambda _s=sub: self._run_axis_moves(
+                                axis, _s, v, testbench=testbench),
+                            testbench=testbench)
+                        bres['phase'] = 'benchmark'
+                        bres['velocity'] = v
+                        results.append(bres)
+                        if bres.get('failed'):
+                            bench_failed = True
+                            gcmd.respond_info(
+                                "  ⚠ lost steps at move %d/%d — run aborted "
+                                "(no further grinding)"
+                                % (ci + len(sub), len(targets)))
+                            break
+                    if bench_failed:
+                        attempt += 1
+                        hi = cand * (1.0 - backoff)
+                        gcmd.respond_info(
+                            "  ↻ Stage 3 benchmark FAILED → back to stage 1 "
+                            "below %.0f (attempt %d/%d)"
+                            % (hi, attempt, max_redo))
+                        if hi <= low:
+                            break
+                        continue
+
+                    # Passed all three stages — accept the derated value.
+                    best = bench_val
+                    break
+
+                if best is None:
+                    gcmd.respond_info(
+                        "  ✗ V=%.0f mm/s excluded — no value passed all three "
+                        "stages (down to the %.0f floor, %d attempts)."
+                        % (v, low, attempt))
+                    continue
+
+                envelope.append((v, best))
+                prev_amax = best
                 gcmd.respond_info(
-                    "  ✓ V=%.0f mm/s  →  max safe accel ≈ %.0f mm/s²"
-                    % (v, safe))
+                    "  ✓ V=%.0f mm/s  →  max safe accel %.0f mm/s² "
+                    "(passed search + validation + benchmark)"
+                    % (v, best))
         finally:
             self._restore_limits()
 
@@ -1072,11 +1398,8 @@ class SpeedTest:
 
     def _write_envelope_csv(self, path, envelope, results, meta):
         with open(path, 'w') as f:
-            f.write("# Speed Test v%s — V/A ENVELOPE\n" % MODULE_VERSION)
-            f.write("# Plugin by Steven (Fragmon) — Crydteam\n")
-            f.write("# YouTube: https://www.youtube.com/@crydteamprinting\n")
-            for k, v in meta.items():
-                f.write("# %s: %s\n" % (k, v))
+            self._write_csv_preamble(
+                f, "Speed Test v%s — V/A ENVELOPE" % MODULE_VERSION, meta)
             f.write("# --- envelope: max safe accel per velocity ---\n")
             f.write("velocity_mm_s,max_accel_mm_s2\n")
             for v, a in sorted(envelope, key=lambda p: p[0]):
@@ -1099,13 +1422,17 @@ class SpeedTest:
         vk, ak = envelope[knee_i]
         knee_pts = [None] * len(envelope)
         knee_pts[knee_i] = ak
-        meta_html = ''.join(
-            '<div><strong>%s:</strong> %s</div>' % (k, v)
-            for k, v in meta.items())
+        meta_html = self._meta_to_html(meta)
         rows = "".join(
             "<tr%s><td>%.0f</td><td>%.0f</td></tr>"
             % (' style="background:#fff3cd"' if i == knee_i else '', v, a)
             for i, (v, a) in enumerate(envelope))
+        # Current printer.cfg + TMC values, for side-by-side comparison.
+        cfg_v = meta.get('printer_max_velocity', '—')
+        cfg_a = meta.get('printer_max_accel', '—')
+        cfg_scv = meta.get('printer_scv', '—')
+        tmc_drv = meta.get('tmc_driver', 'none')
+        tmc_cur = meta.get('tmc_run_current', '—')
         tpl = """<!DOCTYPE html>
 <html><head><meta charset="UTF-8">
 <title>Speed Test (V/A Envelope) — %(ts)s</title>
@@ -1128,6 +1455,17 @@ th,td { padding:8px 12px; border:1px solid #ddd; text-align:right; }
 th { background:#f5f5f5; }
 .footer { text-align:center; color:#666; padding:20px; font-size:13px; }
 .footer a { color:#1976d2; }
+.compare { background:white; padding:20px; border-radius:8px;
+           margin-bottom:20px; box-shadow:0 2px 4px rgba(0,0,0,.1); }
+.compare td:first-child, .compare th:first-child { text-align:left; }
+.compare .tmc { margin-top:12px; color:#555; font-size:14px; }
+.userfield { background:#fff8e1; border-left:4px solid #f9a825;
+             padding:14px 18px; border-radius:8px; margin-bottom:20px; }
+.userfield label { font-weight:bold; margin-right:8px; }
+.userfield input { font-size:15px; padding:6px 10px; border:1px solid #ccc;
+                   border-radius:6px; width:160px; }
+.userfield .hint { display:block; margin-top:6px; color:#777;
+                   font-size:13px; }
 </style></head><body>
 <h1>Speed Test — Velocity / Acceleration Envelope</h1>
 <p style="color:#666;margin-top:-10px;">
@@ -1141,6 +1479,25 @@ th { background:#f5f5f5; }
      <em>(raw knee value — apply your own safety margin)</em></p>
   <p>Everything on or below the curve is safe: pick any (velocity, accel)
      pair under the line and set <em>both</em> in printer.cfg.</p>
+</div>
+<div class="userfield">
+  <label for="thw">Toolhead weight:</label>
+  <input id="thw" type="text" placeholder="e.g. 450 g" />
+  <span class="hint">Note your moving mass — a heavier toolhead lowers the
+     safe acceleration. Saved with this report in your browser.</span>
+</div>
+<div class="compare">
+  <h2>Your config vs. this run</h2>
+  <table><thead><tr><th>Parameter</th><th>Current printer.cfg</th>
+    <th>Found here (knee, raw)</th></tr></thead><tbody>
+    <tr><td>max_velocity</td><td>%(cfg_v)s</td><td>%(vk).0f mm/s</td></tr>
+    <tr><td>max_accel</td><td>%(cfg_a)s</td><td>%(ak).0f mm/s&sup2;</td></tr>
+    <tr><td>square_corner_velocity</td><td>%(cfg_scv)s</td>
+        <td>not tested</td></tr>
+  </tbody></table>
+  <p class="tmc">Motor driver: <strong>%(tmc_drv)s</strong> &middot;
+     run_current: <strong>%(tmc_cur)s</strong> — acceleration scales with
+     current, so note it when comparing runs.</p>
 </div>
 <div class="chart-container">
   <h2>Max safe acceleration vs. velocity</h2>
@@ -1170,13 +1527,27 @@ new Chart(document.getElementById('envChart'), {
                  beginAtZero:true } },
     plugins:{ legend:{position:'top'} } },
 });
+// Persist the toolhead-weight free-text field in the browser, keyed to
+// this report so each run keeps its own value across reloads/printing.
+(function () {
+  var key = 'crydteam_thw_' + %(ts_key)s;
+  var el = document.getElementById('thw');
+  if (!el) return;
+  try { el.value = localStorage.getItem(key) || ''; } catch (e) {}
+  el.addEventListener('input', function () {
+    try { localStorage.setItem(key, el.value); } catch (e) {}
+  });
+})();
 </script>
 </body></html>"""
         html = tpl % {
             'ts': meta.get('timestamp', '-'),
+            'ts_key': json.dumps(meta.get('timestamp', '-')),
             'plugin': '%s v%s' % (MODULE_NAME, MODULE_VERSION),
             'meta_html': meta_html,
             'vk': vk, 'ak': ak,
+            'cfg_v': cfg_v, 'cfg_a': cfg_a, 'cfg_scv': cfg_scv,
+            'tmc_drv': tmc_drv, 'tmc_cur': tmc_cur,
             'rows': rows,
             'vs': json.dumps([round(v, 1) for v in vs]),
             'as': json.dumps([round(a, 1) for a in as_]),
@@ -1187,7 +1558,7 @@ new Chart(document.getElementById('envChart'), {
             f.write(html)
 
     def cmd_FIND_MAX_SCV(self, gcmd):
-        self._check_endstop_phase()
+        self._check_ready()
         if self.testbench_default or gcmd.get_int('TESTBENCH', 0,
                                                   minval=0, maxval=1):
             raise gcmd.error(
@@ -1244,7 +1615,7 @@ new Chart(document.getElementById('envChart'), {
                           no_html, 'scv', gcmd)
 
     def cmd_BENCHMARK(self, gcmd):
-        self._check_endstop_phase()
+        self._check_ready()
         if self.testbench_default or gcmd.get_int('TESTBENCH', 0,
                                                   minval=0, maxval=1):
             raise gcmd.error(
@@ -1354,16 +1725,8 @@ new Chart(document.getElementById('envChart'), {
         target. Starts at MAX_CURRENT and searches downward via
         adaptive bisection on the current value.
         """
-        self._check_endstop_phase()
-        testbench = bool(gcmd.get_int(
-            'TESTBENCH', 1 if self.testbench_default else 0,
-            minval=0, maxval=1))
-        axis = gcmd.get('AXIS', self.default_axis).upper()
-        if testbench and axis != 'X':
-            raise gcmd.error(
-                "Testbench mode supports AXIS=X only.")
-        if axis not in ('X', 'Y'):
-            raise gcmd.error("AXIS must be X or Y")
+        self._check_ready()
+        testbench, axis = self._parse_testbench_axis(gcmd, tb_note=".")
 
         # TMC driver is required to change current at runtime
         info = self._lookup_tmc_for_axis(axis)
@@ -1654,18 +2017,26 @@ new Chart(document.getElementById('envChart'), {
             "Margin from axis ends: %.1f mm\n"
             "TMC SG monitoring: %s\n"
             "Max current cap: %s\n"
+            "Skip tolerance (max_missed): %.2f full steps\n"
             "Output dir: %s"
             % (MODULE_VERSION, self.structure, self.default_axis,
                "on (only X used, no Y/Z homing)"
                if self.testbench_default else "off",
                self.z_pos, self.margin,
                "on" if self.monitor_tmc else "off",
-               max_curr_str,
+               max_curr_str, self.max_missed,
                self.output_dir))
+        # Skip detection reads the stepper MCU position directly; the
+        # endstop_phase module is not used and must NOT be loaded (it
+        # aborts homing on the first lost step).
         ep = self.printer.lookup_object('endstop_phase', None)
+        mcu_ok = self._read_mcu_pos(self.default_axis) is not None
         gcmd.respond_info(
+            "Skip detection: direct stepper MCU position (%s)\n"
             "endstop_phase module: %s"
-            % ("present ✓" if ep is not None else "MISSING ✗"))
+            % ("readable ✓" if mcu_ok else "NOT readable ✗",
+               "PRESENT ✗ — remove it, it will abort the test"
+               if ep is not None else "absent ✓ (correct)"))
         for axis in ('X', 'Y'):
             try:
                 lo, hi, mid, rng = self._get_axis_bounds(axis)
@@ -1748,13 +2119,25 @@ new Chart(document.getElementById('envChart'), {
                cfg_key, safe * 0.9, unit,
                safe * 0.8, unit))
 
+    def _write_csv_preamble(self, f, title, meta):
+        """Common CSV header: title + attribution lines + the meta block."""
+        f.write("# %s\n" % title)
+        f.write("# Plugin by Steven (Fragmon) — Crydteam\n")
+        f.write("# YouTube: https://www.youtube.com/@crydteamprinting\n")
+        for k, v in meta.items():
+            f.write("# %s: %s\n" % (k, v))
+
+    @staticmethod
+    def _meta_to_html(meta):
+        """Render the meta dict as the report's <div> grid entries."""
+        return ''.join('<div><strong>%s:</strong> %s</div>' % (k, v)
+                       for k, v in meta.items())
+
     def _write_csv(self, path, results, meta, kind):
         with open(path, 'w') as f:
-            f.write("# Speed Test v%s results — %s\n" % (MODULE_VERSION, kind))
-            f.write("# Plugin by Steven (Fragmon) — Crydteam\n")
-            f.write("# YouTube: https://www.youtube.com/@crydteamprinting\n")
-            for k, v in meta.items():
-                f.write("# %s: %s\n" % (k, v))
+            self._write_csv_preamble(
+                f, "Speed Test v%s results — %s" % (MODULE_VERSION, kind),
+                meta)
             f.write("phase,value,failed,max_diff,skip_axes,"
                     "x_sg_min,x_sg_median,y_sg_min,y_sg_median\n")
             for r in results:
@@ -1801,9 +2184,7 @@ new Chart(document.getElementById('envChart'), {
                 '<div class="summary"><h2>Result</h2>'
                 '<p>Test completed without trigger.</p></div>')
 
-        meta_html = ''.join(
-            '<div><strong>%s:</strong> %s</div>' % (k, v)
-            for k, v in meta.items())
+        meta_html = self._meta_to_html(meta)
 
         rows = []
         for r in results:

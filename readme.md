@@ -13,7 +13,7 @@ A collection of Klipper diagnostic and tuning plugins by **Steven (Fragmon) — 
 
 | Plugin | Purpose |
 | ------ | ------- |
-| `speed_test.py` | Adaptive max-velocity / max-acceleration / max-SCV detection for steppers, plus a combined velocity–acceleration envelope sweep. Skipped-step detection via `endstop_phase`. CSV + HTML report. |
+| `speed_test.py` | Adaptive max-velocity / max-acceleration / max-SCV detection for steppers, plus a combined velocity–acceleration envelope sweep. Skipped-step detection by reading the stepper MCU position directly (no `endstop_phase`). CSV + HTML report. |
 
 > Looking for the extruder StallGuard flow test? That's in a separate repo: [klipper_max_flow_test](https://github.com/Fragmon/klipper_max_flow_test).
 
@@ -38,8 +38,8 @@ If your XY motors are TMC drivers, the plugin can additionally poll `StallGuard`
 ## Requirements
 
 - Klipper or Kalico
-- `[endstop_phase]` module configured (Klipper-stock — no extra install)
-- Endstops that home reliably to the same MCU phase each time
+- Endstops that home repeatably (a physical switch is best; sensorless homing has more jitter — raise `max_missed` if needed)
+- **`[endstop_phase]` must NOT be loaded** — see the note in [Configuration](#configuration). Skipped-step detection no longer needs it, and if it is configured it aborts homing the moment the motor loses a step.
 - Optional: TMC drivers on XY for StallGuard monitoring (TMC2240, TMC2209, TMC5160, TMC2130, TMC2660)
 
 ---
@@ -69,13 +69,14 @@ cd ~/crydteamtools
 
 ## Configuration
 
-### 1. Enable `endstop_phase` (Klipper-stock)
+### 1. Do NOT enable `endstop_phase`
 
-Add to your `printer.cfg` — required for skipped-step detection:
-
-```ini
-[endstop_phase]
-```
+Skipped-step detection reads the stepper's MCU step position directly after
+each re-home — **no `[endstop_phase]` is needed**. If `[endstop_phase]` (or
+any `[endstop_phase stepper_*]`) is configured, **remove it** and
+`FIRMWARE_RESTART`: its TMC phase cross-check raises `Endstop … incorrect
+phase` and aborts homing exactly when the motor loses a step — which is the
+event the test is built to detect. `SPEED_TEST_STATUS` warns if it's loaded.
 
 ### 2. Plugin section
 
@@ -87,6 +88,10 @@ margin: 20                    # mm to keep from each axis end
 z_pos: 20                     # Z height during XY tests
 monitor_tmc: True             # poll TMC StallGuard during moves
 testbench: False              # see "Testbench mode" below
+max_missed: 1.5               # skip tolerance, in FULL motor steps. A move
+                              # counts as a skip when the stepper drifts more
+                              # than this across a re-home. ~1 step of homing
+                              # jitter is normal; real stalls lose far more.
 max_current: 1.5              # hard safety cap (A) for OPTIMAL_CURRENT.
                               # 0 (default) = no cap.
 #output_dir: ~/printer_data/config/Speedtest
@@ -119,14 +124,9 @@ SPEED_TEST_FIND_MAX_ACCEL    AXIS=X TESTBENCH=1 SPEED=200
 
 `TESTBENCH=0` forces it off even when the config has `testbench: True`.
 
-Make sure your `[endstop_phase]` either covers only X, or that you've added a
-real X endstop. A minimal testbench `[endstop_phase]` looks like:
-
-```ini
-[endstop_phase stepper_x]
-```
-
-That tracks X only and won't complain about a missing Y endstop.
+All you need wired is a working X endstop so `G28 X` homes repeatably — the
+plugin reads the X stepper position directly, so no `[endstop_phase]` setup
+is required (and it should not be present).
 
 After `FIRMWARE_RESTART`, run `SPEED_TEST_STATUS` to verify the plugin loaded and your axes are recognised.
 
@@ -190,9 +190,13 @@ Maps the **velocity–acceleration envelope** of an axis — the combined test.
 
 `FIND_MAX_ACCEL` finds the max accel at *one* fixed `SPEED`. But velocity and acceleration are physically coupled: a stepper's usable torque drops as speed rises (back-EMF eats into the current the driver can push through the windings), so the max safe acceleration is **lower at high velocity and higher at low velocity**. Pick the wrong `SPEED` for an accel test and the result is either unsafe at higher speeds or needlessly conservative at lower ones.
 
-This test sweeps several velocities and finds the max safe accel at each, producing the whole curve plus a balanced `max_velocity` / `max_accel` recommendation taken from the **knee** of the envelope (the point past which buying more speed costs the most acceleration).
+This test sweeps several velocities and finds the max safe accel at each, producing the whole curve plus a balanced `max_velocity` / `max_accel` recommendation taken from the **knee** of the envelope (the point past which buying more speed costs the most acceleration). To save time, each velocity warm-starts its accel search from the previous (lower-velocity) result — since the curve only falls as velocity rises.
 
-To save time, each velocity point warm-starts its accel search from the previous (lower-velocity) result — since the curve only falls as velocity rises, there's no need to re-climb from scratch each time.
+**Three-stage search per velocity.** A value is accepted only after it passes *all three* stages; if stage 2 or 3 fails it drops the ceiling and goes back to stage 1 (up to `MAX_REDO` times). If nothing passes every stage, that velocity is honestly **excluded** from the curve rather than reported as safe.
+
+1. **Stage 1 — bracket.** A relative-accuracy **binary search** (no fixed step; stops when the guess is within `ACCEL_ACCU` of a bracket bound) using short, stall-safe *jab* moves. Each jab is sized to the motion profile (`V²/A`) and anchored **near home, 10 % into the travel**, so the search is fast, a stall barely grinds, and the re-home stays short. The search ends on a freshly **confirmed** passing value before handing off. (Jab idea adapted from Anonoei's [klipper_auto_speed](https://github.com/Anonoei/klipper_auto_speed).)
+2. **Stage 2 — validate.** The candidate is re-tested with the thorough reversal-stress pattern (random distances across the axis — where motors actually lose steps). Must pass, or back to stage 1 lower.
+3. **Stage 3 — simulated print.** A print-like run at `BENCH_DERATE` × the candidate: bursts of short infill zigzag + perimeter passes + travels, realistic lengths. For safety it stays in the **centre of the axis** and runs in **chunks** (`BENCH_CHUNK` moves) that re-home between them and **abort on the first lost-step chunk**, so a stall can't grind the whole run into the limit. Must pass, or back to stage 1 lower.
 
 | Parameter          | Default | Description                                  |
 | ------------------ | ------- | -------------------------------------------- |
@@ -202,19 +206,26 @@ To save time, each velocity point warm-starts its accel search from the previous
 | `V_POINTS`         | 5       | Number of velocities sampled between MIN and MAX |
 | `A_MIN`            | 1000    | Lower bound of the accel search (mm/s²)      |
 | `A_MAX`            | 50000   | Upper bound of the accel search (mm/s²)      |
-| `MIN_STEP`         | 250     | Accel bisection precision (mm/s²)            |
-| `REPEAT`           | 15      | Movements per accel step                     |
-| `VERIFY_REPEATS`   | 30      | Movements during each velocity's verify      |
-| `MAX_BISECT_STEPS` | 5       | Cap on bisection iterations per velocity     |
-| `MAX_DIST_FACTOR`  | 4       | Upper bound for random moves (same as accel test) |
-| `SHORT_BIAS`       | 2       | Short-move bias (same as accel test)         |
+| `ACCEL_ACCU`       | 0.05    | Stage-1 stop tolerance, *relative* (0.05 = ±5 %). Resolution scales with the value instead of a fixed step |
+| `REPEAT`           | 15      | Jab moves per stage-1 search step            |
+| `VERIFY_REPEATS`   | 30      | Reversal-stress moves in stage-2 validation  |
+| `MAX_ITERS`        | 12      | Cap on stage-1 binary-search iterations      |
+| `BENCH_SHORT`      | 400     | Stage-3 short **infill** segments            |
+| `BENCH_LONG`       | 60      | Stage-3 long **travel** moves                |
+| `BENCH_CHUNK`      | 80      | Stage-3 moves per chunk before re-home + skip-check (abort on fail) |
+| `BENCH_DERATE`     | 0.9     | Stage-3 tests/accepts at this fraction of the found value — safer, fewer crashes |
+| `MAX_REDO`         | 4       | Re-determination attempts before a velocity is excluded |
+| `MAX_DIST_FACTOR`  | 4       | Upper bound for stage-2 random moves         |
+| `SHORT_BIAS`       | 2       | Stage-2 short-move bias                       |
 | `SEED`             | 12345   | Random seed for reproducible move sequences  |
-| `TESTBENCH`        | config  | `1` = single-stepper bench mode (X only)     |
+| `TESTBENCH`        | config  | `1` = single-stepper bench mode (X only). Stage 3 also runs on the single axis |
 | `NO_HTML`          | 0       | Set to 1 for CSV-only output                 |
 
-The console prints the full table plus three ready-to-paste operating points — **balanced** (the knee), **speed-priority** (highest velocity with its accel ceiling), and **accel-priority** (lowest velocity with the highest accel) — each already including a 10 % safety margin. The HTML report draws the envelope curve with the knee highlighted: anything on or below the line is safe.
+The console prints the full table plus three ready-to-paste operating points — **balanced** (the knee), **speed-priority** (highest velocity with its accel ceiling), and **accel-priority** (lowest velocity with the highest accel) — each already including a 10 % safety margin. The HTML report draws the envelope curve with the knee highlighted, and lists your **current `printer.cfg` values** and the **TMC driver / run_current** side by side, plus a free-text **toolhead-weight** field saved with the report.
 
-A velocity point is skipped if reaching it within the axis travel would require an accel above `A_MAX` (very short axes can't reach high speeds in a triangle move) — the skip is reported so you know the curve has a gap.
+A velocity point is skipped if reaching it within the axis travel would need an accel above the search ceiling (very short axes can't reach high speeds in a triangle move) — the skip is reported so you know the curve has a gap.
+
+> **Runtime:** stage 3 is thorough — hundreds of moves per accepted value, plus a fresh run on every re-determination. For a quick first pass, lower the load, e.g. `V_POINTS=3 BENCH_SHORT=120 BENCH_LONG=20 BENCH_CHUNK=40`.
 
 ### `SPEED_TEST_FIND_MAX_SCV`
 
@@ -303,7 +314,7 @@ Runs a repeatable stress test at a fixed `SPEED` / `ACCEL` / `SCV` and reports p
 
 ### `SPEED_TEST_STATUS`
 
-Diagnostic. Prints structure, default axis, axis bounds, TMC presence per axis, and whether `endstop_phase` is loaded.
+Diagnostic. Prints structure, default axis, axis bounds, TMC presence + run_current per axis, the `max_missed` skip tolerance, and whether the stepper position is readable. It also **warns if `[endstop_phase]` is loaded** (which must be removed — see [Configuration](#configuration)).
 
 ---
 
@@ -412,13 +423,13 @@ under more realistic load.
 
 ### Skipped-step detection
 
-Klipper's `endstop_phase` module records the **MCU step phase** at each home. If the motor lost steps during a move, the next home will land on a different phase by the corresponding number of microsteps. The plugin compares phases before and after each test step — a difference larger than `microsteps` (one full step) is reported as a skip.
+The plugin reads the stepper's **MCU step position** directly from the kinematics (`get_mcu_position`) right after each re-home, and compares it with the position before the test move. A shift larger than `max_missed` full steps means the motor lost steps. Reading the position directly means **no `[endstop_phase]` module is needed** — and crucially, it can't be: `endstop_phase` cross-checks the TMC microstep phase and aborts homing with `incorrect phase` the instant a step is lost, which is exactly the event this test is built to measure.
 
-This is the same mechanism the user macro version uses, but the plugin reads it directly from the module's API rather than via Jinja templates.
+About `max_missed`: without `endstop_phase`'s phase-snapping, a home can land up to ~1 full step off purely from mechanical jitter, so the default tolerance of 1.5 full steps leaves headroom. A real stall loses tens to thousands of microsteps — far above the threshold.
 
 ### Why adaptive bisection?
 
-A linear sweep from 100 → 800 mm/s with a 10 mm/s step takes **70 measurements**. Bisection with the same precision takes **~12 measurements** (6 coarse + 3 bisect + 1 verify, give or take). For longer per-move durations or noisy environments, that difference is 20+ minutes.
+A linear sweep from 100 → 800 mm/s with a 10 mm/s step takes **70 measurements**. The envelope's relative-accuracy binary search converges in **~6–10 measurements** per velocity. For longer per-move durations or noisy environments, that difference is 20+ minutes.
 
 ### Optional TMC monitoring
 
@@ -430,15 +441,15 @@ Supported drivers (auto-detected): TMC2240, TMC2209, TMC5160, TMC2130, TMC2660, 
 
 ## Troubleshooting
 
-### "speed_test: [endstop_phase] module not configured"
+### "Endstop stepper_x incorrect phase (got … vs …)"
 
-Add `[endstop_phase]` to your `printer.cfg` and `FIRMWARE_RESTART`. The module ships with Klipper — no extra install.
+`[endstop_phase]` is loaded. It aborts homing the moment the motor loses a step — which the test does on purpose. **Remove `[endstop_phase]` and any `[endstop_phase stepper_*]` from `printer.cfg` and `FIRMWARE_RESTART`.** The plugin detects skips without it. `SPEED_TEST_STATUS` warns when it's still present.
 
 ### Tests always pass even at obviously-too-high values
 
-- Make sure `[endstop_phase]` is actually loaded — `SPEED_TEST_STATUS` reports this
-- Check that your endstops are physical switches that home to a repeatable phase (sensorless homing can give false negatives here)
-- Try a smaller `MIN_STEP` to bisect more aggressively past stable plateaus
+- Check that your endstop is a physical switch that homes repeatably (sensorless homing gives more jitter — raise `max_missed` only if you see false *positives*, not to mask false negatives)
+- If homing isn't repeatable, the position reference drifts; verify `G28` lands consistently
+- Lower `ACCEL_ACCU` (e.g. 0.02) so the envelope search resolves the limit more finely
 
 ### Test triggers immediately at MIN
 
@@ -469,6 +480,8 @@ YouTube: [@crydteamprinting](https://www.youtube.com/@crydteamprinting)
 Released under the GNU General Public License v3.0.
 
 Algorithm derived from [Ellis's Print Tuning Guide](https://ellis3dp.com/Print-Tuning-Guide/articles/determining_max_speeds_accels.html), reimplemented in Python with adaptive bisection and HTML reporting.
+
+The stall-safe short *jab* move used in stage 1 of the envelope search is adapted from Anonoei's [klipper_auto_speed](https://github.com/Anonoei/klipper_auto_speed) (MIT).
 
 ---
 
