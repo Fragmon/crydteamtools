@@ -1054,8 +1054,10 @@ class SpeedTest:
           • Stage 2 validates the found value with the thorough
             reversal-stress pattern across the axis.
           • Stage 3 (optional, needs a TMC driver) trims the run_current
-            for the accepted (V, A) from the configured current downward
-            with short near-home jab moves — lower current = cooler motor.
+            for the accepted (V, A) from the ceiling downward with short
+            near-home jab moves — lower current = cooler motor. The ceiling
+            is the [speed_test] max_current cap when set, otherwise the
+            stepper's configured run_current; the search never exceeds it.
           • Stage 4 is the closing benchmark: a simulated print (BENCH_SHORT
             infill + BENCH_LONG travels) at BENCH_DERATE × the found value,
             run AT the trimmed current — the real operating point. It stays
@@ -1151,10 +1153,19 @@ class SpeedTest:
             meta['tmc_run_current'] = (
                 '%.3f A' % orig_current if orig_current is not None
                 else 'unknown')
-        # Stage 4 needs a TMC driver and a readable current.
+        # Top of the current range for the test: the config max_current
+        # safety cap when set, else the stepper's configured run_current.
+        # The current search never goes above this.
+        current_ceiling = (self.max_current if self.max_current > 0
+                           else orig_current)
+        # Current trimming needs a TMC driver, a readable current to restore,
+        # and a ceiling above the floor.
         do_current = bool(find_current and tmc_info is not None
                           and orig_current is not None
-                          and orig_current > min_current)
+                          and current_ceiling is not None
+                          and current_ceiling > min_current)
+        meta['current_ceiling'] = ('%.3f A' % current_ceiling
+                                   if current_ceiling is not None else '—')
         meta['stage4_current'] = 'yes' if do_current else 'no'
         gcmd.respond_info(
             "===== Speed Test v%s — V/A ENVELOPE on %s =====\n"
@@ -1164,7 +1175,8 @@ class SpeedTest:
             "Why combined: motor torque drops as speed rises, so max accel "
             "depends on velocity.\n"
             "Stage 1: fast jab bracket. Stage 2: reversal-stress validate.\n"
-            "Stage 3: trim run_current downward (cooler motor) — %s.\n"
+            "Stage 3: trim run_current from the ceiling down (cooler "
+            "motor) — %s.\n"
             "Stage 4: final print-sim benchmark (%d+%d moves, %.0f%% derate, "
             "chunked, centre-of-axis) at the trimmed current — redo on fail.\n"
             "Usable %s travel: %.0f mm | %d moves/step\n"
@@ -1283,24 +1295,25 @@ class SpeedTest:
                     accel_val = cand * bench_derate
 
                     # Stage 3: trim run_current at (V, accel_val) from the
-                    # configured current downward — cooler motor. Safe by
-                    # construction: it uses the short, near-home jab moves.
-                    trim_cur = orig_current
+                    # ceiling (config max_current cap) downward — cooler
+                    # motor. Safe by construction: short, near-home jab moves.
+                    trim_cur = current_ceiling
                     if do_current:
                         gcmd.respond_info(
                             "  ──── Stage 3: trim current for V=%.0f A=%.0f, "
                             "from %.3f A down ────"
-                            % (v, accel_val, orig_current))
+                            % (v, accel_val, current_ceiling))
                         trim_cur = self._search_min_current(
-                            gcmd, results, axis, v, accel_val, orig_current,
-                            min_current, current_accu, current_margin,
-                            max_bisect, current_repeat, testbench)
+                            gcmd, results, axis, v, accel_val,
+                            current_ceiling, orig_current, min_current,
+                            current_accu, current_margin, max_bisect,
+                            current_repeat, testbench)
 
                     # Stage 4: final print-simulation benchmark at the trimmed
                     # current — the real operating point. If it fails, the
-                    # current was too low for a sustained print: bump it back
-                    # up toward the configured value and retry. If it fails
-                    # even at full current, the accel is too high → stage 1.
+                    # current was too low for a sustained print: bump it up
+                    # toward the ceiling and retry. If it fails even at the
+                    # ceiling, the accel is too high → back to stage 1.
                     gcmd.respond_info(
                         "  ──── Stage 4: final benchmark %d+%d moves at "
                         "V=%.0f A=%.0f, current %s ────"
@@ -1313,18 +1326,24 @@ class SpeedTest:
                         if do_current:
                             self._set_run_current(axis, cur)
                             self.gcode.run_script_from_command("G4 P200")
+                            # Use what the driver actually delivers (discrete
+                            # steps / hardware cap) so messages and the saved
+                            # value match reality.
+                            actual = self._read_run_current(axis)
+                            if actual is not None:
+                                cur = actual
                         final_failed = self._run_print_benchmark(
                             gcmd, results, axis, v, accel_val,
                             bench_short, bench_long, bench_chunk,
                             bench_chunk_grow, seed, testbench)
                         if not final_failed:
                             break
-                        if (do_current and cur < orig_current - 1e-6
+                        if (do_current and cur < current_ceiling - 1e-6
                                 and bumps < max_redo):
                             bumps += 1
-                            cur = min(orig_current,
+                            cur = min(current_ceiling,
                                       cur + max(0.05,
-                                                (orig_current - trim_cur)
+                                                (current_ceiling - trim_cur)
                                                 / 3.0))
                             gcmd.respond_info(
                                 "  ↻ Final benchmark failed — current too low,"
@@ -1416,15 +1435,17 @@ class SpeedTest:
         return False
 
     def _search_min_current(self, gcmd, results, axis, velocity, accel,
-                            original, min_current, accu, margin, max_iter,
-                            reps, testbench):
+                            ceiling, restore, min_current, accu, margin,
+                            max_iter, reps, testbench):
         """Stage 3: lowest run_current that still holds (velocity, accel),
-        searched downward from `original` by relative-accuracy bisection.
-        Lower current = cooler motor. Uses the short, near-home jab moves
-        so a stall at low current barely grinds. Always restores `original`
-        before returning. Returns the recommended current (lowest passing ×
-        (1 + margin), capped at `original`), or `original` if even that
-        already fails the test."""
+        searched downward from `ceiling` (the config max_current cap, or the
+        configured run_current) by relative-accuracy bisection. Lower
+        current = cooler motor. Uses the short, near-home jab moves so a
+        stall at low current barely grinds. Always restores `restore` (the
+        stepper's original run_current) before returning. Returns the
+        recommended current (lowest passing × (1 + margin), capped at the
+        actual delivered ceiling), or that ceiling if even it already
+        fails the test."""
         self._set_limits(velocity=velocity, accel=accel)
 
         def test_at(cur):
@@ -1444,12 +1465,12 @@ class SpeedTest:
             return actual, not r['failed']
 
         try:
-            a0, ok0 = test_at(original)
+            a0, ok0 = test_at(ceiling)
             if not ok0:
                 gcmd.respond_info(
-                    "    configured %.3f A already fails here — keeping it."
+                    "    ceiling %.3f A already fails here — keeping it."
                     % a0)
-                return original
+                return a0
             lo, hi, last_pass = min_current, a0, a0
             prev_act = a0
             it = 0
@@ -1472,7 +1493,7 @@ class SpeedTest:
             result = min(a0, last_pass * (1.0 + margin))
             return result
         finally:
-            self._set_run_current(axis, original)
+            self._set_run_current(axis, restore)
             self.gcode.run_script_from_command("G4 P200")
 
     def _find_knee(self, envelope):
