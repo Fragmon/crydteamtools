@@ -22,7 +22,7 @@ microsteps — far above the threshold.
 ## Why adaptive bisection?
 
 A linear sweep from 100 → 800 mm/s with a 10 mm/s step takes **70
-measurements**. The envelope's relative-accuracy binary search converges in
+measurements**. The limit map's relative-accuracy binary search converges in
 **~6–10 measurements** per velocity. For longer per-move durations or noisy
 environments, that difference is 20+ minutes.
 

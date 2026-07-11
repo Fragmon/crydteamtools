@@ -40,10 +40,8 @@ class SpeedTest:
         self.margin = config.getfloat('margin', 20.0, above=0.)
         self.z_pos = config.getfloat('z_pos', 20.0, minval=0.)
         self.monitor_tmc = config.getboolean('monitor_tmc', True)
-        # Skipped-step tolerance, in FULL motor steps. A move is a "skip"
-        # when the stepper's MCU position shifts by more than this across a
-        # re-home. ~1 step of homing jitter is normal without endstop_phase,
-        # so the default leaves headroom; real stalls lose far more.
+        # Skip tolerance in FULL steps across a re-home (~1 step of homing
+        # jitter is normal; real stalls lose far more).
         self.max_missed = config.getfloat('max_missed', 1.5, above=0.)
         # Testbench mode: only X-stepper connected, no Y, no Z. Skips all
         # Y/Z homing and ignores Y in skip checks and TMC monitoring.
@@ -86,10 +84,14 @@ class SpeedTest:
             self.cmd_BENCHMARK,
             desc='Repeatable random-pattern stress test at fixed speed/accel')
         self.gcode.register_command(
-            'SPEED_TEST_FIND_ENVELOPE',
-            self.cmd_FIND_ENVELOPE,
-            desc='Map the velocity-acceleration envelope: find max safe '
+            'SPEED_TEST_FIND_LIMITS',
+            self.cmd_FIND_LIMITS,
+            desc='Map the velocity/acceleration limits: find max safe '
                  'accel at several velocities (they are physically coupled)')
+        self.gcode.register_command(
+            'SPEED_TEST_FIND_ENVELOPE',
+            self.cmd_FIND_LIMITS,
+            desc='Deprecated alias for SPEED_TEST_FIND_LIMITS')
         self.gcode.register_command(
             'SPEED_TEST_FIND_OPTIMAL_CURRENT',
             self.cmd_FIND_OPTIMAL_CURRENT,
@@ -354,19 +356,9 @@ class SpeedTest:
     def _do_accel_pattern(self, axis, velocity, min_dist, max_dist,
                           repeat, seed=12345, testbench=False,
                           short_bias=2.0):
-        """Movement pattern for the accel test.
-
-        The main stress on a motor during the accel test comes from
-        rapid direction reversals — short back-and-forth moves where
-        the motor has to brake hard and accelerate again immediately.
-        So the distance distribution is biased toward the small end of
-        [min_dist, max_dist] via a power-law skew (short_bias > 1 →
-        more short moves, fewer long ones).
-
-        Each move also starts at a random offset along the axis so the
-        test covers varied positions, not a tight loop on the same
-        coordinate.
-        """
+        """Reversal-stress pattern: random-length moves biased short
+        (short_bias power-law) at random offsets — reversals are where
+        motors actually lose steps."""
         ax_min, ax_max, ax_mid, ax_range = self._get_axis_bounds(axis)
 
         rng = random.Random(seed)
@@ -398,40 +390,17 @@ class SpeedTest:
 
     def _do_jab_pattern(self, axis, velocity, accel, repeat,
                         testbench=False):
-        """Stage-1 fast, stall-safe 'jab' move (idea from Anonoei's
-        klipper_auto_speed).
-
-        The move length is sized to the motion profile — V²/A, the
-        triangle distance that just reaches the target velocity at its
-        peak — and anchored near the home end (10 % into the usable
-        travel). Three wins over a full-axis sweep:
-          • each test is short, so the bracketing search is fast,
-          • a stalled motor only grinds that short distance before the
-            commanded move ends, instead of being driven across the whole
-            axis into the limit, and
-          • sitting near home keeps the approach and the re-home after
-            each test short, instead of driving out to the far axis end
-            and back every time.
-
-        It's a quick out-and-back (reversal at both turns for some stress)
-        running from the 10 % point toward the far end and back — used
-        only to bracket the limit. The thorough reversal-stress pattern
-        validates the final value in stage 2.
-        """
+        """Fast stall-safe probe (idea from Anonoei's klipper_auto_speed):
+        short out-and-back of length V²/A (just reaches V), anchored 10%
+        from home — quick to run, and a stall barely grinds."""
         ax_min, ax_max, ax_mid, ax_range = self._get_axis_bounds(axis)
-        # Triangle distance that just touches V at the peak: V²/A.
         dist = (velocity ** 2) / accel
         dist = max(5.0, min(dist, ax_range))
-        # Anchor near home: start 10 % into the usable travel and jab
-        # toward the far end (away from the home limit), then back. Short
-        # approach + short re-home. For a large jab that wouldn't fit from
-        # the 10 % mark, shift it down just enough to stay on the axis.
         low = ax_min + 0.10 * ax_range
         high = low + dist
         if high > ax_max:
             high = ax_max
             low = max(ax_min, high - dist)
-        # Park at the near (home-side) point first — skip Z in testbench.
         self._park_with_zlift(axis, low, velocity, testbench)
         for _ in range(repeat):
             self._move_to_axis(axis, high, velocity)
@@ -440,22 +409,12 @@ class SpeedTest:
 
     def _build_print_sim_moves(self, axis, velocity, accel, n_infill,
                                n_travel, seed, fullspeed_frac=0.15):
-        """Build the stage-4 'simulated print' as a list of absolute target
-        coordinates — short infill zigzag (rapid reversals, the hardest
-        stress), medium perimeter passes and travels.
-
-        Short/medium moves stay in the CENTRE of the axis (lost steps drift
-        but don't reach the limit; the caller bounds a stall to one chunk by
-        re-homing and aborting). At least `fullspeed_frac` of the moves are
-        full-speed sweeps that actually reach the target velocity — those
-        need the length, so they use the full usable travel.
-        """
+        """Build the simulated-print move list: short infill zigzag +
+        perimeters + travels confined to the centre of the axis, with at
+        least `fullspeed_frac` of the moves long enough to reach V."""
         ax_min, ax_max, ax_mid, ax_range = self._get_axis_bounds(axis)
         rng = random.Random(seed)
         frac = min(max(fullspeed_frac, 0.0), 0.5)
-        # Distance to reach the target velocity (triangle peak = V). The
-        # velocity is already capped to what the axis can reach, so this
-        # never exceeds the usable travel.
         reach = min(max((velocity ** 2) / accel, 1.0), ax_range)
         pad = 0.15 * ax_range
         rmin, rmax = ax_min + pad, ax_max - pad
@@ -528,12 +487,8 @@ class SpeedTest:
             targets.append(start)
             placed += 1
 
-        # Guarantee the realized fraction. The bounce can clamp a long mix
-        # move shorter than its requested length, so the `inc`/`units`
-        # estimate above isn't sufficient on its own. Measure the ACTUAL
-        # move lengths and top up with guaranteed full-speed out-and-back
-        # sweeps (never clamped) until at least `frac` of the executed
-        # moves really reach V.
+        # The bounce may clamp long moves short, so measure the ACTUAL
+        # lengths and top up with full-speed sweeps until >= frac reach V.
         nreach = sum(1 for i in range(1, len(targets))
                      if abs(targets[i] - targets[i - 1]) >= reach - 1e-9)
         moves = max(0, len(targets) - 1)
@@ -793,22 +748,10 @@ class SpeedTest:
 
     def _binary_search_max(self, gcmd, results, low_bound, high_bound,
                            accuracy, max_iter, label, measure_at):
-        """Relative-accuracy binary search (adapted from Anonoei's
-        klipper_auto_speed) — no fixed step size.
-
-        Probes the first guess at 1/3 of the bracket (biased low for
-        safety), then bisects: a passing value raises the floor, a failing
-        one lowers the ceiling. Stops when the last guess is within
-        `accuracy` (a fraction, e.g. 0.05 = 5%) of a bracket bound, so the
-        resolution scales with the magnitude instead of an absolute step.
-
-        measure_at(value, phase) is called with phase='search' (the caller
-        uses that to pick the fast stall-safe pattern). After bracketing,
-        the candidate is re-tested so the returned value's most recent
-        result is always a PASS. Returns that freshly-confirmed value — or
-        None if nothing in the bracket can be confirmed (so the caller
-        never treats an untested or just-failed value as safe).
-        """
+        """Relative-accuracy binary search (no fixed step; stops within
+        `accuracy` of a bound). Ends by re-testing the candidate so the
+        returned value was just confirmed passing — or None if nothing in
+        the bracket can be confirmed."""
         low = low_bound
         high = high_bound
         guess = low + (high - low) / 3.0
@@ -1084,48 +1027,18 @@ class SpeedTest:
         self._save_report(results, meta, timestamp, reason,
                           no_html, 'accel', gcmd)
 
-    def cmd_FIND_ENVELOPE(self, gcmd):
-        """Map the velocity-acceleration envelope of an axis.
+    def cmd_FIND_LIMITS(self, gcmd):
+        """Map the velocity/acceleration limits of an axis.
 
-        Velocity and acceleration are physically coupled: a stepper's
-        usable torque falls as speed rises (back-EMF eats into the
-        current the driver can push through the windings), so the max
-        safe acceleration is lower at high velocity and higher at low
-        velocity. A single FIND_MAX_ACCEL at one fixed SPEED only samples
-        one slice of that curve — pick the wrong SPEED and the resulting
-        accel is either unsafe at higher speeds or needlessly low at
-        lower ones.
-
-        This test sweeps several velocities and finds the max safe accel
-        at each, producing the whole envelope plus a balanced
-        max_velocity / max_accel recommendation (the knee of the curve).
-
-        Three-stage per velocity:
-          • Stage 1 brackets the limit with a relative-accuracy binary
-            search (no fixed step) using short, stall-safe 'jab' moves
-            (V²/A long, anchored near home) — fast, and a stall barely
-            grinds.
-          • Stage 2 validates the found value with the thorough
-            reversal-stress pattern across the axis.
-          • Stage 3 (optional, needs a TMC driver) trims the run_current
-            for the accepted (V, A) from the ceiling downward with short
-            near-home jab moves — lower current = cooler motor. The ceiling
-            is the [speed_test] max_current cap when set, otherwise the
-            stepper's configured run_current; the search never exceeds it.
-          • Stage 4 is the closing benchmark: a simulated print (BENCH_SHORT
-            infill + BENCH_LONG travels) at BENCH_DERATE × the found value,
-            run AT the trimmed current — the real operating point. It stays
-            in the centre of the axis and runs in chunks that abort on the
-            first lost-step chunk. If it fails the current was too low for a
-            sustained print → bump the current up and retry; if it fails
-            even at full current the accel is too high → back to stage 1.
-            The configured current is always restored afterwards.
-
-        A value is only accepted once it passes ALL THREE stages. If
-        stage 2 or stage 3 fails it goes back to stage 1 with a lowered
-        ceiling (up to MAX_REDO attempts) — it never backs off and accepts
-        a failing value. If no value clears every stage, the velocity is
-        excluded from the envelope rather than reported as safe.
+        Motor torque falls as speed rises, so the max safe accel depends
+        on velocity. Per swept velocity: stage 1 brackets the limit with
+        fast stall-safe jab moves (relative-accuracy binary search),
+        stage 2 validates with the reversal-stress pattern, stage 3 runs
+        a simulated-print benchmark at full current (fail → lower accel,
+        back to stage 1, up to MAX_REDO times), stage 4 finds the lowest
+        run_current that still holds the point and confirms it with a
+        closing long run. Unpassable velocities are excluded, not
+        reported as safe.
         """
         self._check_ready()
         testbench, axis = self._parse_testbench_axis(gcmd)
@@ -1134,9 +1047,7 @@ class SpeedTest:
         v_points = gcmd.get_int('V_POINTS', 5, minval=2, maxval=12)
         a_min = gcmd.get_float('A_MIN', 1000.0, above=0.)
         a_max = gcmd.get_float('A_MAX', 50000.0, above=a_min)
-        # Relative-accuracy binary search (no fixed step). Stop when the
-        # guess is within ACCEL_ACCU of a bracket bound — resolution scales
-        # with the value instead of an absolute MIN_STEP.
+        # Stage-1 stop tolerance, relative (0.05 = ±5%).
         accel_accu = gcmd.get_float('ACCEL_ACCU', 0.05, above=0., below=1.)
         repeat = gcmd.get_int('REPEAT', 15, minval=1, maxval=100)
         verify_repeats = gcmd.get_int('VERIFY_REPEATS', 30,
@@ -1146,36 +1057,22 @@ class SpeedTest:
         short_bias = gcmd.get_float('SHORT_BIAS', 2.0, minval=1., maxval=5.)
         seed = gcmd.get_int('SEED', 12345)
         no_html = gcmd.get_int('NO_HTML', 0, minval=0, maxval=1)
-        # Stage 3: simulated-print benchmark per found value — bursts of
-        # short infill zigzag + perimeters + travels at realistic lengths.
-        # If it fails, the value is re-determined at a lower ceiling, up to
-        # MAX_REDO times. BENCH_SHORT = infill segments, BENCH_LONG =
-        # travel moves.
+        # Stage-3 benchmark: infill segments + travel moves, run in growing
+        # sections (start BENCH_CHUNK, ×BENCH_CHUNK_GROW per clean section)
+        # with a re-home + skip-check between them.
         bench_short = gcmd.get_int('BENCH_SHORT', 400, minval=0, maxval=5000)
         bench_long = gcmd.get_int('BENCH_LONG', 60, minval=0, maxval=2000)
-        # Benchmark in chunks: re-home + skip-check after each, abort on the
-        # first failing chunk so a stall grinds at most one chunk. The first
-        # chunk is BENCH_CHUNK moves; each clean chunk grows the next by
-        # BENCH_CHUNK_GROW (capped at 8×), so checks are tight early — when a
-        # stall is most likely and grinding must stay short — and loosen as
-        # the motor proves itself, saving re-homes.
         bench_chunk = gcmd.get_int('BENCH_CHUNK', 40, minval=5, maxval=1000)
         bench_chunk_grow = gcmd.get_float('BENCH_CHUNK_GROW', 1.5,
                                           minval=1.0, maxval=4.0)
-        # At least this fraction of stage-4 moves must actually reach the
-        # (effective) target velocity — the rest are short infill that never
-        # gets up to speed, exactly like a real print.
+        # Min fraction of benchmark moves that must reach the target speed.
         fullspeed_frac = gcmd.get_float('FULLSPEED_FRAC', 0.15,
                                         minval=0.0, maxval=1.0)
-        # Validate (and accept) at BENCH_DERATE × the found value, not the
-        # bleeding edge — fewer failures, far less likely to crash.
+        # Accepted accel = BENCH_DERATE × the stage-2 value (safety derate).
         bench_derate = gcmd.get_float('BENCH_DERATE', 0.9,
                                       minval=0.5, maxval=1.0)
         max_redo = gcmd.get_int('MAX_REDO', 4, minval=0, maxval=10)
-        # Stage 4: for each accepted (V, A), search the lowest TMC
-        # run_current that still holds it, from the configured current
-        # downward — lower current = cooler motor. Auto-skipped if the axis
-        # has no TMC driver. Disable with FIND_CURRENT=0.
+        # Stage 4 current trim (needs TMC; disable with FIND_CURRENT=0).
         find_current = gcmd.get_int('FIND_CURRENT', 1, minval=0, maxval=1)
         min_current = gcmd.get_float('MIN_CURRENT', 0.3, above=0.)
         current_margin = gcmd.get_float('CURRENT_MARGIN', 0.1,
@@ -1192,7 +1089,7 @@ class SpeedTest:
         v_list = [v_min + step * i for i in range(v_points)]
 
         timestamp = time.strftime('%Y-%m-%d_%H-%M-%S')
-        meta = self._build_meta('ENVELOPE', axis,
+        meta = self._build_meta('LIMITS', axis,
                                 {'V_MIN': v_min, 'V_MAX': v_max,
                                  'V_POINTS': v_points, 'A_MIN': a_min,
                                  'A_MAX': a_max, 'ACCEL_ACCU': accel_accu,
@@ -1212,9 +1109,8 @@ class SpeedTest:
             meta['tmc_run_current'] = (
                 '%.3f A' % orig_current if orig_current is not None
                 else 'unknown')
-        # Top of the current range for the test: the config max_current
-        # safety cap when set, else the stepper's configured run_current.
-        # The current search never goes above this.
+        # Current ceiling: config max_current cap, else the configured
+        # run_current. The search never exceeds it.
         current_ceiling = (self.max_current if self.max_current > 0
                            else orig_current)
         # Current trimming needs a TMC driver, a readable current to restore,
@@ -1227,28 +1123,28 @@ class SpeedTest:
                                    if current_ceiling is not None else '—')
         meta['stage4_current'] = 'yes' if do_current else 'no'
         gcmd.respond_info(
-            "===== Speed Test v%s — V/A ENVELOPE on %s =====\n"
+            "===== Speed Test v%s — V/A LIMITS on %s =====\n"
             "Plugin by Steven (Fragmon) — Crydteam\n"
             "Sweeping %d velocities %.0f → %.0f mm/s; finding max safe "
             "accel at each.\n"
             "Why combined: motor torque drops as speed rises, so max accel "
             "depends on velocity.\n"
             "Stage 1: fast jab bracket. Stage 2: reversal-stress validate.\n"
-            "Stage 3: trim run_current from the ceiling down (cooler "
+            "Stage 3: final print-sim benchmark (%d+%d moves, %.0f%% derate, "
+            "chunked, centre-of-axis) at full current — redo on fail.\n"
+            "Stage 4: trim run_current from the ceiling down (cooler "
             "motor) — %s.\n"
-            "Stage 4: final print-sim benchmark (%d+%d moves, %.0f%% derate, "
-            "chunked, centre-of-axis) at the trimmed current — redo on fail.\n"
             "Usable %s travel: %.0f mm | %d moves/step\n"
             "================================================"
             % (MODULE_VERSION, axis, v_points, v_min, v_max,
-               "on" if do_current else "off (no TMC / disabled)",
                bench_short, bench_long, bench_derate * 100,
+               "on" if do_current else "off (no TMC / disabled)",
                axis, ax_range, repeat))
 
         self._set_limits(velocity=v_max * 1.2, accel=a_max)
         self._ensure_homed([axis], testbench=testbench)
         results = []
-        envelope = []
+        limits = []
 
         try:
             for idx, v in enumerate(v_list):
@@ -1310,12 +1206,8 @@ class SpeedTest:
                     r['accel'] = accel
                     return r
 
-                # Rigorous staged search. A value is only accepted once it
-                # passes EVERY stage. Any stage failing sends it back to
-                # stage 1 with a lowered ceiling — it never just backs off
-                # and accepts a failing value. `best` stays None until a
-                # value clears every stage; if none does, the point is
-                # honestly excluded from the envelope.
+                # Staged search: any failing stage lowers the ceiling and
+                # restarts at stage 1; only fully-passed values are kept.
                 hi = high
                 attempt = 0
                 backoff = max(accel_accu, 0.1)
@@ -1324,8 +1216,7 @@ class SpeedTest:
                 best_v = None
                 best_v_req = None
                 while attempt <= max_redo:
-                    # Stage 1: search for the highest value that passes the
-                    # quick jab test (None if even the floor fails).
+                    # Stage 1: jab bracket.
                     cand = self._binary_search_max(
                         gcmd, results, low, hi, accel_accu, max_bisect,
                         'A', measure_at)
@@ -1335,7 +1226,7 @@ class SpeedTest:
                             "even the quick search." % (v, low, hi))
                         break
 
-                    # Stage 2: thorough reversal-stress validation must pass.
+                    # Stage 2: reversal-stress validation.
                     vres = measure_at(cand, 'verify')
                     vres['phase'] = 'verify'
                     results.append(vres)
@@ -1350,13 +1241,10 @@ class SpeedTest:
                             break
                         continue
 
-                    # Accel accepted (derated) once it survives stages 3+4.
                     accel_val = cand * bench_derate
 
-                    # Reducing the accel raises the distance needed to reach V
-                    # (V²/A). If that exceeds the run length, V can't be
-                    # reached, so cap the velocity to the max the axis allows
-                    # at this accel (a full-length triangle peaks at √(A·L)).
+                    # If the derated accel can no longer reach V within the
+                    # travel, cap the velocity to √(A·L).
                     v_eff = v
                     v_reach = math.sqrt(accel_val * ax_range)
                     if v_reach < v - 1e-6:
@@ -1367,85 +1255,96 @@ class SpeedTest:
                             "velocity capped to the max achievable %.0f mm/s."
                             % (accel_val, v, ax_range, v_eff))
 
-                    # Stage 3: trim run_current at (v_eff, accel_val) from the
-                    # ceiling (config max_current cap) downward — cooler
-                    # motor. Safe by construction: short, near-home jab moves.
-                    trim_cur = current_ceiling
+                    # Stage 3: print benchmark at full current — a failure
+                    # can only mean the accel is too high.
+                    bench_cur = None
                     if do_current:
-                        gcmd.respond_info(
-                            "  ──── Stage 3: trim current for V=%.0f A=%.0f, "
-                            "from %.3f A down ────"
-                            % (v_eff, accel_val, current_ceiling))
-                        trim_cur = self._search_min_current(
-                            gcmd, results, axis, v_eff, accel_val,
-                            current_ceiling, orig_current, min_current,
-                            current_accu, current_margin, max_bisect,
-                            current_repeat, testbench)
-
-                    # Stage 4: final print-simulation benchmark at the trimmed
-                    # current — the real operating point. If it fails, the
-                    # current was too low for a sustained print: bump it up
-                    # toward the ceiling and retry. If it fails even at the
-                    # ceiling, the accel is too high → back to stage 1.
+                        self._set_run_current(axis, current_ceiling)
+                        self.gcode.run_script_from_command("G4 P200")
+                        bench_cur = self._read_run_current(axis) \
+                            or current_ceiling
                     gcmd.respond_info(
-                        "  ──── Stage 4: final benchmark %d+%d moves at "
+                        "  ──── Stage 3: final benchmark %d+%d moves at "
                         "V=%.0f A=%.0f (≥%.0f%% reach full speed), current "
                         "%s ────"
                         % (bench_short, bench_long, v_eff, accel_val,
                            fullspeed_frac * 100,
-                           "%.3f A" % trim_cur if do_current else "n/a"))
-                    cur = trim_cur
-                    bumps = 0
-                    final_failed = True
-                    while True:
-                        if do_current:
-                            self._set_run_current(axis, cur)
-                            self.gcode.run_script_from_command("G4 P200")
-                            # Use what the driver actually delivers (discrete
-                            # steps / hardware cap) so messages and the saved
-                            # value match reality.
-                            actual = self._read_run_current(axis)
-                            if actual is not None:
-                                cur = actual
-                        final_failed = self._run_print_benchmark(
-                            gcmd, results, axis, v_eff, accel_val,
-                            bench_short, bench_long, bench_chunk,
-                            bench_chunk_grow, seed, fullspeed_frac, testbench)
-                        if not final_failed:
-                            break
-                        if (do_current and cur < current_ceiling - 1e-6
-                                and bumps < max_redo):
-                            bumps += 1
-                            cur = min(current_ceiling,
-                                      cur + max(0.05,
-                                                (current_ceiling - trim_cur)
-                                                / 3.0))
-                            gcmd.respond_info(
-                                "  ↻ Final benchmark failed — current too low,"
-                                " bumping to %.3f A (bump %d/%d)"
-                                % (cur, bumps, max_redo))
-                            continue
-                        break
+                           "%.3f A (full)" % bench_cur
+                           if bench_cur is not None else "n/a"))
+                    final_failed = self._run_print_benchmark(
+                        gcmd, results, axis, v_eff, accel_val,
+                        bench_short, bench_long, bench_chunk,
+                        bench_chunk_grow, seed, fullspeed_frac, testbench)
                     if final_failed:
                         attempt += 1
                         hi = cand * (1.0 - backoff)
                         gcmd.respond_info(
-                            "  ↻ Final benchmark FAILED even at full current "
-                            "→ accel too high, back to stage 1 below %.0f "
-                            "(attempt %d/%d)" % (hi, attempt, max_redo))
+                            "  ↻ Benchmark FAILED at full current → accel too "
+                            "high, back to stage 1 below %.0f (attempt %d/%d)"
+                            % (hi, attempt, max_redo))
                         if do_current:
                             self._set_run_current(axis, orig_current)
                         if hi <= low:
                             break
                         continue
 
+                    # Stage 4: trim current, then confirm it with a closing
+                    # long run (raise toward the ceiling on failure — the
+                    # ceiling already passed stage 3, so this converges).
+                    best_current = None
+                    if do_current:
+                        gcmd.respond_info(
+                            "  ──── Stage 4: min current for V=%.0f A=%.0f, "
+                            "from %.3f A down ────"
+                            % (v_eff, accel_val, current_ceiling))
+                        best_current = self._search_min_current(
+                            gcmd, results, axis, v_eff, accel_val,
+                            current_ceiling, orig_current, min_current,
+                            current_accu, current_margin, max_bisect,
+                            current_repeat, testbench)
+                        # Full current already passed the stage-3 long run —
+                        # only a genuinely reduced current needs confirming.
+                        full_cur = (bench_cur if bench_cur is not None
+                                    else current_ceiling)
+                        if best_current >= full_cur - 1e-3:
+                            gcmd.respond_info(
+                                "  • no current reduction possible — full "
+                                "%.3f A is already long-run-proven."
+                                % full_cur)
+                        else:
+                            step = max(0.05, (full_cur - best_current) / 3.0)
+                            while True:
+                                self._set_run_current(axis, best_current)
+                                self.gcode.run_script_from_command("G4 P200")
+                                actual = self._read_run_current(axis)
+                                if actual is not None:
+                                    best_current = actual
+                                if best_current >= full_cur - 1e-3:
+                                    gcmd.respond_info(
+                                        "  • long run only holds at the full "
+                                        "%.3f A (already proven)."
+                                        % best_current)
+                                    break
+                                gcmd.respond_info(
+                                    "  ──── Stage 4b: confirm %.3f A with a "
+                                    "long run ────" % best_current)
+                                if not self._run_print_benchmark(
+                                        gcmd, results, axis, v_eff, accel_val,
+                                        bench_short, bench_long, bench_chunk,
+                                        bench_chunk_grow, seed,
+                                        fullspeed_frac, testbench):
+                                    break
+                                best_current = min(full_cur,
+                                                   best_current + step)
+                                gcmd.respond_info(
+                                    "  ↻ long run failed — raising current "
+                                    "to %.3f A." % best_current)
+                        self._set_run_current(axis, orig_current)
+
                     # Passed every stage — accept (v_eff, accel, current).
                     best = accel_val
-                    best_current = cur if do_current else None
                     best_v = v_eff
                     best_v_req = v if v_eff < v - 1e-6 else None
-                    if do_current:
-                        self._set_run_current(axis, orig_current)
                     break
 
                 if best is None:
@@ -1455,7 +1354,7 @@ class SpeedTest:
                         % (v, low, attempt))
                     continue
 
-                envelope.append((best_v, best, best_current, best_v_req))
+                limits.append((best_v, best, best_current, best_v_req))
                 cur_note = ("" if best_current is None
                             else "  |  run_current %.3f A (was %.3f A)"
                                  % (best_current, orig_current))
@@ -1470,13 +1369,13 @@ class SpeedTest:
                 self._set_run_current(axis, orig_current)
             self._restore_limits()
 
-        if len(envelope) < 2:
+        if len(limits) < 2:
             raise gcmd.error(
-                "Envelope needs at least 2 testable velocity points. "
+                "Limits needs at least 2 testable velocity points. "
                 "Lower V_MAX, raise A_MAX, or test on a longer axis.")
 
-        self._envelope_summary(gcmd, axis, envelope)
-        self._save_envelope_report(envelope, results, meta, timestamp,
+        self._limits_summary(gcmd, axis, limits)
+        self._save_limits_report(limits, results, meta, timestamp,
                                    no_html, gcmd)
 
     def _run_print_benchmark(self, gcmd, results, axis, velocity, accel,
@@ -1516,15 +1415,9 @@ class SpeedTest:
     def _search_min_current(self, gcmd, results, axis, velocity, accel,
                             ceiling, restore, min_current, accu, margin,
                             max_iter, reps, testbench):
-        """Stage 3: lowest run_current that still holds (velocity, accel),
-        searched downward from `ceiling` (the config max_current cap, or the
-        configured run_current) by relative-accuracy bisection. Lower
-        current = cooler motor. Uses the short, near-home jab moves so a
-        stall at low current barely grinds. Always restores `restore` (the
-        stepper's original run_current) before returning. Returns the
-        recommended current (lowest passing × (1 + margin), capped at the
-        actual delivered ceiling), or that ceiling if even it already
-        fails the test."""
+        """Lowest run_current that still holds (velocity, accel), bisected
+        down from `ceiling` using jab probes. Returns lowest passing ×
+        (1 + margin); always restores `restore` before returning."""
         self._set_limits(velocity=velocity, accel=accel)
 
         def test_at(cur):
@@ -1575,16 +1468,15 @@ class SpeedTest:
             self._set_run_current(axis, restore)
             self.gcode.run_script_from_command("G4 P200")
 
-    def _find_knee(self, envelope):
-        """Index of the curve's 'knee' — the velocity past which buying
-        more speed costs the most acceleration. Kneedle-style: the point
-        farthest from the chord between the first and last samples,
-        measured in normalized V/A space."""
-        n = len(envelope)
+    def _find_sweet_spot(self, limits):
+        """Index of the curve's sweet spot — the point past which buying
+        more speed costs the most acceleration (farthest from the chord
+        between first and last sample, in normalized V/A space)."""
+        n = len(limits)
         if n <= 2:
             return n - 1
-        vs = [p[0] for p in envelope]
-        as_ = [p[1] for p in envelope]
+        vs = [p[0] for p in limits]
+        as_ = [p[1] for p in limits]
         v0 = vs[0]
         dv = (vs[-1] - vs[0]) or 1.0
         amin, amax = min(as_), max(as_)
@@ -1602,17 +1494,17 @@ class SpeedTest:
                 best_d, best_i = d, i
         return best_i
 
-    def _envelope_summary(self, gcmd, axis, envelope):
-        envelope = sorted(envelope, key=lambda p: p[0])
+    def _limits_summary(self, gcmd, axis, limits):
+        limits = sorted(limits, key=lambda p: p[0])
 
         def cur_of(e):
             return e[2] if len(e) > 2 else None
 
         def req_of(e):
             return e[3] if len(e) > 3 else None
-        has_cur = any(cur_of(e) is not None for e in envelope)
+        has_cur = any(cur_of(e) is not None for e in limits)
         lines = []
-        for e in envelope:
+        for e in limits:
             row = "  V=%-4.0f mm/s" % e[0]
             if req_of(e) is not None:
                 row += " (req %.0f, accel-limited)" % req_of(e)
@@ -1623,26 +1515,26 @@ class SpeedTest:
                         % ("%.3f A" % c if c is not None else "  —  "))
             lines.append(row)
         table = "\n".join(lines)
-        knee = envelope[self._find_knee(envelope)]
-        lo, hi = envelope[0], envelope[-1]    # slow→high accel, fast→low
+        sweet = limits[self._find_sweet_spot(limits)]
+        lo, hi = limits[0], limits[-1]    # slow→high accel, fast→low
         m = 0.9                               # 10 % margin on accel/velocity
 
         def inline_cur(e):
             c = cur_of(e)
             return (" + run_current %.3f A" % c) if c is not None else ""
-        knee_cur = ("\n----------------------------------\n"
+        sweet_cur = ("\n----------------------------------\n"
                     "Cooler motor (stage 4): run_current ≈ %.3f A on "
-                    "stepper_%s\n  (lowest that still held the knee, incl. "
-                    "margin)" % (cur_of(knee), axis.lower())
-                    if cur_of(knee) is not None else "")
+                    "stepper_%s\n  (lowest that still held the sweet spot, incl. "
+                    "margin)" % (cur_of(sweet), axis.lower())
+                    if cur_of(sweet) is not None else "")
         gcmd.respond_info(
-            "\n========== V/A ENVELOPE RESULT (%s) ==========\n"
+            "\n========== V/A LIMITS RESULT (%s) ==========\n"
             "%s\n"
             "----------------------------------\n"
             "The motor trades speed for acceleration. Pick the operating\n"
             "point that matches your prints, then set BOTH in printer.cfg.\n"
             "----------------------------------\n"
-            "Balanced (knee) — recommended:\n"
+            "Balanced (sweet spot) — recommended:\n"
             "  [printer]\n"
             "  max_velocity: %.0f\n"
             "  max_accel:    %.0f%s\n"
@@ -1654,40 +1546,40 @@ class SpeedTest:
             "(accel/velocity include a 10%% safety margin)\n"
             "================================="
             % (axis, table,
-               knee[0] * m, knee[1] * m, knee_cur,
+               sweet[0] * m, sweet[1] * m, sweet_cur,
                hi[0] * m, hi[1] * m, inline_cur(hi),
                lo[0] * m, lo[1] * m, inline_cur(lo)))
 
-    def _save_envelope_report(self, envelope, results, meta, timestamp,
+    def _save_limits_report(self, limits, results, meta, timestamp,
                               no_html, gcmd):
         try:
             os.makedirs(self.output_dir, exist_ok=True)
             csv_path = os.path.join(
-                self.output_dir, 'speed_envelope_%s.csv' % timestamp)
-            self._write_envelope_csv(csv_path, envelope, results, meta)
+                self.output_dir, 'speed_limits_%s.csv' % timestamp)
+            self._write_limits_csv(csv_path, limits, results, meta)
             if gcmd is not None:
                 gcmd.respond_info("CSV saved: %s" % csv_path)
             if not no_html:
                 html_path = os.path.join(
-                    self.output_dir, 'speed_envelope_%s.html' % timestamp)
-                self._write_envelope_html(html_path, envelope, meta)
+                    self.output_dir, 'speed_limits_%s.html' % timestamp)
+                self._write_limits_html(html_path, limits, meta)
                 if gcmd is not None:
                     gcmd.respond_info("HTML saved: %s" % html_path)
         except Exception as e:
             if gcmd is not None:
                 gcmd.respond_info("Warning: report write failed: %s" % e)
-            logging.exception("speed_test: envelope report write failed")
+            logging.exception("speed_test: limits report write failed")
 
-    def _write_envelope_csv(self, path, envelope, results, meta):
+    def _write_limits_csv(self, path, limits, results, meta):
         with open(path, 'w') as f:
             self._write_csv_preamble(
-                f, "Speed Test v%s — V/A ENVELOPE" % MODULE_VERSION, meta)
-            f.write("# --- envelope: max safe accel + min current per "
+                f, "Speed Test v%s — V/A LIMITS" % MODULE_VERSION, meta)
+            f.write("# --- limits: max safe accel + min current per "
                     "velocity (requested_velocity set when accel-limited) "
                     "---\n")
             f.write("velocity_mm_s,max_accel_mm_s2,min_current_A,"
                     "requested_velocity_mm_s\n")
-            for e in sorted(envelope, key=lambda p: p[0]):
+            for e in sorted(limits, key=lambda p: p[0]):
                 cur = e[2] if len(e) > 2 else None
                 req = e[3] if len(e) > 3 else None
                 f.write("%.1f,%.1f,%s,%s\n" % (
@@ -1704,17 +1596,17 @@ class SpeedTest:
                     1 if r['failed'] else 0,
                     r['max_diff'], r['skip_axes'] or '-'))
 
-    def _write_envelope_html(self, path, envelope, meta):
-        envelope = sorted(envelope, key=lambda p: p[0])
-        vs = [e[0] for e in envelope]
-        as_ = [e[1] for e in envelope]
-        curs = [e[2] if len(e) > 2 else None for e in envelope]
-        reqs = [e[3] if len(e) > 3 else None for e in envelope]
+    def _write_limits_html(self, path, limits, meta):
+        limits = sorted(limits, key=lambda p: p[0])
+        vs = [e[0] for e in limits]
+        as_ = [e[1] for e in limits]
+        curs = [e[2] if len(e) > 2 else None for e in limits]
+        reqs = [e[3] if len(e) > 3 else None for e in limits]
         has_cur = any(c is not None for c in curs)
-        knee_i = self._find_knee(envelope)
-        vk, ak = envelope[knee_i][0], envelope[knee_i][1]
-        knee_pts = [None] * len(envelope)
-        knee_pts[knee_i] = ak
+        sweet_i = self._find_sweet_spot(limits)
+        vk, ak = limits[sweet_i][0], limits[sweet_i][1]
+        sweet_pts = [None] * len(limits)
+        sweet_pts[sweet_i] = ak
         meta_html = self._meta_to_html(meta)
         cur_head = "<th>Min current (A)</th>" if has_cur else ""
 
@@ -1725,23 +1617,23 @@ class SpeedTest:
             return "%.0f%s" % (vs[i], note)
         rows = "".join(
             "<tr%s><td>%s</td><td>%.0f</td>%s</tr>"
-            % (' class="knee-row"' if i == knee_i else '',
+            % (' class="sweet-row"' if i == sweet_i else '',
                vel_cell(i), e[1],
                ("<td>%s</td>" % ("%.3f" % curs[i]
                                  if curs[i] is not None else "–"))
                if has_cur else "")
-            for i, e in enumerate(envelope))
+            for i, e in enumerate(limits))
         # Current printer.cfg + TMC values, for side-by-side comparison.
         cfg_v = meta.get('printer_max_velocity', '—')
         cfg_a = meta.get('printer_max_accel', '—')
         cfg_scv = meta.get('printer_scv', '—')
         tmc_drv = meta.get('tmc_driver', 'none')
         tmc_cur = meta.get('tmc_run_current', '—')
-        # Knee run_current tile (only when stage 4 produced currents).
-        knee_cur = curs[knee_i] if has_cur else None
-        knee_cur_block = (
+        # Sweet spot run_current tile (only when stage 4 produced currents).
+        sweet_cur = curs[sweet_i] if has_cur else None
+        sweet_cur_block = (
             '<div class="kv"><b>%.2f</b><span>run_current A</span></div>'
-            % knee_cur if knee_cur is not None else '')
+            % sweet_cur if sweet_cur is not None else '')
         # Optional second chart line: min current on a right-hand axis.
         if has_cur:
             cur_dataset = (
@@ -1762,7 +1654,7 @@ class SpeedTest:
         tpl = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Speed Test (V/A Envelope) — %(ts)s</title>
+<title>Speed Test (V/A Limits) — %(ts)s</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0"></script>
 <style>
 :root{ --bg:#eef2f9; --card:#fff; --ink:#1f2733; --muted:#6b7787;
@@ -1783,7 +1675,7 @@ header.hero a{ color:#fff; }
   margin-bottom:20px; box-shadow:0 2px 12px rgba(20,40,80,.06);
   border:1px solid var(--line); }
 .card h2{ margin:0 0 14px; font-size:16px; color:var(--blue); }
-.hero-knee{ background:linear-gradient(135deg,#e9f2ff,#f4f9ff);
+.hero-sweet{ background:linear-gradient(135deg,#e9f2ff,#f4f9ff);
   border-color:#cfe0f5; }
 .kvs{ display:flex; flex-wrap:wrap; gap:14px 30px; margin:4px 0; }
 .kv{ display:flex; flex-direction:column; }
@@ -1802,6 +1694,15 @@ header.hero a{ color:#fff; }
 .field .hint{ display:block; margin-top:6px; color:var(--muted); font-size:12px; }
 .field-card{ background:linear-gradient(135deg,#fff8e6,#fffdf6);
   border-color:#f1e2b4; }
+.savebar{ display:flex; align-items:center; gap:14px; margin-top:16px;
+  flex-wrap:wrap; }
+.savebar .hint{ color:var(--muted); font-size:12px; }
+#savebtn{ font-size:14px; font-weight:600; padding:9px 18px; border:none;
+  border-radius:9px; background:var(--blue); color:#fff; cursor:pointer;
+  transition:background .15s, transform .05s; }
+#savebtn:hover{ background:var(--blue2); }
+#savebtn:active{ transform:scale(.97); }
+#savebtn.saved{ background:var(--green); }
 table{ width:100%%; border-collapse:collapse; font-size:14px; }
 th,td{ padding:9px 12px; text-align:right; }
 td:first-child,th:first-child{ text-align:left; }
@@ -1811,8 +1712,8 @@ thead th{ background:#f3f6fb; color:var(--muted); font-weight:600;
 tbody tr{ border-bottom:1px solid var(--line); }
 tbody tr:last-child{ border-bottom:none; }
 tbody tr:hover{ background:#f7faff; }
-tr.knee-row{ background:#fff3da; font-weight:600; }
-tr.knee-row:hover{ background:#ffeccb; }
+tr.sweet-row{ background:#fff3da; font-weight:600; }
+tr.sweet-row:hover{ background:#ffeccb; }
 .tmc{ margin-top:14px; color:var(--muted); font-size:13px; }
 .meta{ display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
   gap:7px 18px; font-size:12.5px; color:var(--muted); }
@@ -1823,20 +1724,20 @@ canvas{ max-height:380px; }
 </style></head><body>
 <div class="wrap">
 <header class="hero">
-  <h1>&#9889; Speed Test &middot; Velocity / Acceleration Envelope</h1>
+  <h1>&#9889; Speed Test &middot; Velocity / Acceleration Limits</h1>
   <div class="sub">Plugin by Steven (Fragmon) — Crydteam &middot;
     <a href="https://www.youtube.com/@crydteamprinting" target="_blank">@crydteamprinting</a>
     &middot; %(ts)s</div>
 </header>
 
-<div class="card hero-knee">
-  <h2>&#127919; Recommended balanced point (knee)</h2>
+<div class="card hero-sweet">
+  <h2>&#127919; Recommended balanced point (sweet spot)</h2>
   <div class="kvs">
     <div class="kv"><b>%(vk).0f</b><span>max_velocity mm/s</span></div>
     <div class="kv"><b>%(ak).0f</b><span>max_accel mm/s&sup2;</span></div>
-    %(knee_cur_block)s
+    %(sweet_cur_block)s
   </div>
-  <p class="note">Raw knee values. Everything on or below the curve is safe —
+  <p class="note">Raw sweet spot values. Everything on or below the curve is safe —
      pick any (velocity, accel) pair under the line and set <em>both</em> in
      printer.cfg.</p>
 </div>
@@ -1854,6 +1755,24 @@ canvas{ max-height:380px; }
       <input id="stp" type="text" placeholder="e.g. stepper_x &mdash; LDO-42STH48" />
       <span class="hint">Which motor this run is for.</span>
     </div>
+    <div class="field">
+      <label for="vin">Supply voltage</label>
+      <input id="vin" type="text" placeholder="e.g. 24 V / 48 V" />
+      <span class="hint">Motor supply (VM) &mdash; higher voltage sustains
+        torque at speed.</span>
+    </div>
+    <div class="field">
+      <label for="drv">Driver model</label>
+      <input id="drv" type="text" value="%(drv_prefill)s"
+             placeholder="e.g. tmc5160 &mdash; BTT Pro" />
+      <span class="hint">Pre-filled with the detected driver &mdash; add the
+        board/module if you like.</span>
+    </div>
+  </div>
+  <div class="savebar">
+    <button id="savebtn" type="button">&#128190; Save values into file</button>
+    <span class="hint" id="savehint">Downloads a copy of this report with the
+      values baked in &mdash; independent of this browser.</span>
   </div>
 </div>
 
@@ -1865,7 +1784,7 @@ canvas{ max-height:380px; }
 <div class="card">
   <h2>&#9878;&#65039; Your config vs. this run</h2>
   <table><thead><tr><th>Parameter</th><th>Current printer.cfg</th>
-    <th>Found here (knee, raw)</th></tr></thead><tbody>
+    <th>Found here (sweet spot, raw)</th></tr></thead><tbody>
     <tr><td>max_velocity</td><td>%(cfg_v)s</td><td>%(vk).0f mm/s</td></tr>
     <tr><td>max_accel</td><td>%(cfg_a)s</td><td>%(ak).0f mm/s&sup2;</td></tr>
     <tr><td>square_corner_velocity</td><td>%(cfg_scv)s</td>
@@ -1891,14 +1810,14 @@ canvas{ max-height:380px; }
 <div class="footer">Generated by <strong>%(plugin)s</strong> at %(ts)s</div>
 </div>
 <script>
-const vs = %(vs)s, accels = %(as)s, knee = %(knee)s;
+const vs = %(vs)s, accels = %(as)s, sweet = %(sweet)s;
 new Chart(document.getElementById('envChart'), {
   type:'line',
   data:{ labels: vs, datasets:[
     { label:'Max safe accel', data: accels, borderColor:'#1565c0',
       backgroundColor:'rgba(21,101,192,.10)', fill:true, tension:.25,
       pointRadius:4, pointBackgroundColor:'#1565c0', borderWidth:2.5 },
-    { label:'Knee (balanced)', data: knee, borderColor:'#fb8c00',
+    { label:'Sweet spot (balanced)', data: sweet, borderColor:'#fb8c00',
       backgroundColor:'#fb8c00', pointRadius:9, pointHoverRadius:11,
       showLine:false }%(cur_dataset)s
   ]},
@@ -1916,12 +1835,51 @@ new Chart(document.getElementById('envChart'), {
     var key = 'crydteam_' + id + '_' + %(ts_key)s;
     var el = document.getElementById(id);
     if (!el) return;
-    try { el.value = localStorage.getItem(key) || ''; } catch (e) {}
+    // Keep a server-side prefill (value attribute) unless the user
+    // already saved something for this report.
+    try {
+      var stored = localStorage.getItem(key);
+      if (stored !== null) el.value = stored;
+    } catch (e) {}
     el.addEventListener('input', function () {
       try { localStorage.setItem(key, el.value); } catch (e) {}
     });
   }
-  persist('thw'); persist('stp');
+  persist('thw'); persist('stp'); persist('vin'); persist('drv');
+
+  // Save button: bake the current field values into the document (value
+  // attributes) and download the report as a standalone file, so the
+  // entries survive independent of this browser's localStorage.
+  var btn = document.getElementById('savebtn');
+  if (btn) btn.addEventListener('click', function () {
+    ['thw', 'stp', 'vin', 'drv'].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) el.setAttribute('value', el.value);
+    });
+    var html = '<!DOCTYPE html>\\n' + document.documentElement.outerHTML;
+    var name = 'speed_limits_saved.html';
+    try {
+      var base = decodeURIComponent(
+          location.pathname.split('/').pop() || '');
+      if (base.toLowerCase().slice(-5) === '.html') {
+        name = base.slice(0, -5).replace(/_saved$/, '') + '_saved.html';
+      }
+    } catch (e) {}
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(
+        new Blob([html], {type: 'text/html'}));
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
+    btn.classList.add('saved');
+    btn.innerHTML = '&#10003; Saved';
+    setTimeout(function () {
+      btn.classList.remove('saved');
+      btn.innerHTML = '&#128190; Save values into file';
+    }, 2500);
+  });
 })();
 </script>
 </body></html>"""
@@ -1930,15 +1888,16 @@ new Chart(document.getElementById('envChart'), {
             'ts_key': json.dumps(meta.get('timestamp', '-')),
             'plugin': '%s v%s' % (MODULE_NAME, MODULE_VERSION),
             'meta_html': meta_html,
-            'vk': vk, 'ak': ak, 'knee_cur_block': knee_cur_block,
+            'vk': vk, 'ak': ak, 'sweet_cur_block': sweet_cur_block,
             'cfg_v': cfg_v, 'cfg_a': cfg_a, 'cfg_scv': cfg_scv,
             'tmc_drv': tmc_drv, 'tmc_cur': tmc_cur,
+            'drv_prefill': tmc_drv if tmc_drv != 'none' else '',
             'rows': rows, 'cur_head': cur_head,
             'cur_dataset': cur_dataset, 'y1_axis': y1_axis,
             'vs': json.dumps([round(v, 1) for v in vs]),
             'as': json.dumps([round(a, 1) for a in as_]),
-            'knee': json.dumps([round(a, 1) if a is not None else None
-                                for a in knee_pts]),
+            'sweet': json.dumps([round(a, 1) if a is not None else None
+                                for a in sweet_pts]),
         }
         with open(path, 'w') as f:
             f.write(html)

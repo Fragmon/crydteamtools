@@ -26,7 +26,7 @@ max_missed: 1.5               # skip tolerance, in FULL motor steps. A move
                               # than this across a re-home. ~1 step of homing
                               # jitter is normal; real stalls lose far more.
 max_current: 1.5              # hard safety cap (A). Upper bound for
-                              # OPTIMAL_CURRENT and the envelope's stage-3
+                              # OPTIMAL_CURRENT and the limit map's stage-3
                               # current trim. 0 (default) = no cap (use the
                               # stepper's configured run_current instead).
 #output_dir: ~/printer_data/config/Speedtest

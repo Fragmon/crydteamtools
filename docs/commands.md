@@ -2,8 +2,8 @@
 
 [← back to README](../README.md)
 
-The combined V/A/current envelope has its own page:
-[V/A envelope](envelope.md). The single-axis / utility commands are below.
+The combined V/A/current limit map has its own page:
+[V/A limits](limits.md). The single-axis / utility commands are below.
 
 Every test saves a CSV + HTML report — see [Output & reports](output.md).
 
@@ -144,7 +144,7 @@ SPEED_TEST_FIND_OPTIMAL_CURRENT AXIS=X SPEED=200 ACCEL=20000
 # 3) Update printer.cfg → run_current: 0.85, FIRMWARE_RESTART.
 ```
 
-> Tip: the [V/A envelope](envelope.md) does this current trim automatically per
+> Tip: the [V/A limits](limits.md) does this current trim automatically per
 > velocity (stage 3), so you usually don't need this command separately.
 
 ---

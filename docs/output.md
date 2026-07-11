@@ -24,11 +24,11 @@ The HTML report renders in any browser and includes:
 - **Phase markers** — dashed vertical lines at phase transitions
 - **Stop reason** — which trigger fired and at what value
 
-## Envelope report
+## Limit-map report
 
-The [V/A envelope](envelope.md) writes its own report:
+The [V/A limits test](limits.md) writes its own report:
 
-- the envelope **curve** (max safe accel vs. velocity) with the **knee**
+- the limit map **curve** (max safe accel vs. velocity) with the **sweet spot**
   highlighted
 - a **min-current** column per velocity (from stage 3)
 - your **current `printer.cfg` values** and the **TMC driver / run_current**

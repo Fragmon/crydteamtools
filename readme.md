@@ -10,7 +10,7 @@ A collection of Klipper diagnostic and tuning plugins by **Steven (Fragmon) — 
 
 ## `speed_test.py`
 
-**Adaptive max velocity / acceleration / square-corner-velocity finder for stepper motors**, plus a combined **velocity–acceleration envelope** that also trims motor current.
+**Adaptive max velocity / acceleration / square-corner-velocity finder for stepper motors**, plus a combined **velocity–acceleration limit map** that also trims motor current.
 
 It pushes a motor until it loses steps, then narrows in on the safe limit with an adaptive bracket search (≈ 8–12 measurements instead of dozens). Skipped steps are detected by reading the stepper's MCU position directly after a re-home — **no `[endstop_phase]` needed** (and it must not be loaded). Every run saves a CSV + interactive HTML report.
 
@@ -53,7 +53,7 @@ and the `[endstop_phase]` note: **[Configuration →](docs/configuration.md)**
 
 | Command | What it does |
 | ------- | ------------ |
-| [`SPEED_TEST_FIND_ENVELOPE`](docs/envelope.md) | **The flagship.** Sweeps velocities, finds max safe accel at each, trims `run_current`, and validates with a simulated print → a full V/A/current operating map |
+| [`SPEED_TEST_FIND_LIMITS`](docs/limits.md) | **The flagship.** Sweeps velocities, finds max safe accel at each, trims `run_current`, and validates with a simulated print → a full speed/accel/current operating map |
 | [`SPEED_TEST_FIND_MAX_VELOCITY`](docs/commands.md#speed_test_find_max_velocity) | Max safe velocity for an axis |
 | [`SPEED_TEST_FIND_MAX_ACCEL`](docs/commands.md#speed_test_find_max_accel) | Max safe acceleration at a fixed velocity |
 | [`SPEED_TEST_FIND_MAX_SCV`](docs/commands.md#speed_test_find_max_scv) | Max safe square-corner velocity (XY) |
@@ -65,7 +65,7 @@ and the `[endstop_phase]` note: **[Configuration →](docs/configuration.md)**
 
 ```
 SPEED_TEST_STATUS                              # check config first
-SPEED_TEST_FIND_ENVELOPE AXIS=X                # the combined sweep
+SPEED_TEST_FIND_LIMITS AXIS=X                # the combined sweep
 SPEED_TEST_FIND_MAX_ACCEL AXIS=X SPEED=200     # a single accel test
 ```
 
@@ -74,7 +74,7 @@ SPEED_TEST_FIND_MAX_ACCEL AXIS=X SPEED=200     # a single accel test
 ## Documentation
 
 - **[Configuration](docs/configuration.md)** — all options, testbench mode, the `[endstop_phase]` rule
-- **[V/A envelope](docs/envelope.md)** — the combined sweep, four-stage search, parameters
+- **[V/A limits](docs/limits.md)** — the combined sweep, four-stage search, parameters
 - **[Command reference](docs/commands.md)** — full parameter tables for the single-axis / utility commands
 - **[How it works](docs/how-it-works.md)** — skip detection, adaptive search, TMC monitoring, cruise-aware sizing
 - **[Output & reports](docs/output.md)** — CSV / HTML files
@@ -88,7 +88,7 @@ Plugin by Steven (Fragmon) — Crydteam · YouTube: [@crydteamprinting](https://
 
 Released under the GNU General Public License v3.0.
 
-Algorithm derived from [Ellis's Print Tuning Guide](https://ellis3dp.com/Print-Tuning-Guide/articles/determining_max_speeds_accels.html), reimplemented in Python with adaptive bisection and HTML reporting. The stall-safe short *jab* move in the envelope search is adapted from Anonoei's [klipper_auto_speed](https://github.com/Anonoei/klipper_auto_speed) (MIT).
+Algorithm derived from [Ellis's Print Tuning Guide](https://ellis3dp.com/Print-Tuning-Guide/articles/determining_max_speeds_accels.html), reimplemented in Python with adaptive bisection and HTML reporting. The stall-safe short *jab* move in the limit-map search is adapted from Anonoei's [klipper_auto_speed](https://github.com/Anonoei/klipper_auto_speed) (MIT).
 
 ## Contributing
 

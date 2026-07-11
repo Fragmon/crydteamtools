@@ -17,7 +17,7 @@ present.
   *positives*, not to mask false negatives)
 - If homing isn't repeatable, the position reference drifts; verify `G28` lands
   consistently
-- Lower `ACCEL_ACCU` (e.g. 0.02) so the envelope search resolves the limit more
+- Lower `ACCEL_ACCU` (e.g. 0.02) so the limit map search resolves the limit more
   finely
 
 ## Test triggers immediately at MIN
@@ -33,7 +33,7 @@ SPEED_TEST_FIND_MAX_VELOCITY AXIS=X MIN=20 COARSE_STEP=10
 The accel test needs enough distance to actually reach `SPEED` while
 accelerating at `MIN`. Either raise `MIN` or lower `SPEED`.
 
-## Stage 3/4 of the envelope keeps failing / takes too long
+## Stage 3/4 of the limit map keeps failing / takes too long
 
 - The simulated print is the binding test. If a velocity is excluded, the motor
   genuinely can't sustain that accel under a realistic print at the allowed
