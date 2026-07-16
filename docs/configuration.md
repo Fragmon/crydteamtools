@@ -21,6 +21,10 @@ margin: 20                    # mm to keep from each axis end
 z_pos: 20                     # Z height during XY tests
 monitor_tmc: True             # poll TMC StallGuard during moves
 testbench: False              # see "Testbench mode" below
+start_offset: 0               # mm from the endstop where the search probes
+                              # start. 0 = automatic (20% of usable travel).
+travel_speed: 100             # mm/s for positioning moves to a test's start
+travel_accel: 3000            # mm/s^2 for those positioning moves
 max_missed: 1.5               # skip tolerance, in FULL motor steps. A move
                               # counts as a skip when the stepper drifts more
                               # than this across a re-home. ~1 step of homing
@@ -34,6 +38,20 @@ max_current: 1.5              # hard safety cap (A). Upper bound for
 
 After `FIRMWARE_RESTART`, run `SPEED_TEST_STATUS` to verify the plugin loaded
 and your axes are recognised.
+
+## UI macros (Mainsail / Fluidd)
+
+The repo ships `speed_test_macros.cfg` with one `[gcode_macro]` per test
+(`ST_FIND_LIMITS`, `ST_FIND_MAX_VELOCITY`, `ST_FIND_MAX_ACCEL`,
+`ST_FIND_MAX_SCV`, `ST_FIND_OPTIMAL_CURRENT`, `ST_BENCHMARK`, `ST_STATUS`).
+They show up in the web UI's macro panel **with input fields for every
+parameter**; empty fields are not passed on, so the plugin defaults and your
+`[speed_test]` config stay in charge. `install.sh` links the file into
+`~/printer_data/config/`; enable it with:
+
+```ini
+[include speed_test_macros.cfg]
+```
 
 ## Testbench mode
 

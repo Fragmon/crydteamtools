@@ -47,15 +47,31 @@ for plugin in "${PLUGINS[@]}"; do
     echo "  ✓ ${plugin} → ${dst}"
 done
 
+# UI macros for Mainsail/Fluidd (optional include)
+CONFIG_DIR="${HOME}/printer_data/config"
+if [ -d "${CONFIG_DIR}" ]; then
+    macro_src="${REPO_DIR}/speed_test_macros.cfg"
+    macro_dst="${CONFIG_DIR}/speed_test_macros.cfg"
+    if [ -f "${macro_src}" ]; then
+        if [ -L "${macro_dst}" ] || [ -f "${macro_dst}" ]; then
+            rm -f "${macro_dst}"
+        fi
+        ln -s "${macro_src}" "${macro_dst}"
+        echo "  ✓ speed_test_macros.cfg → ${macro_dst}"
+    fi
+fi
+
 echo ""
 echo "------------------------------------------"
 echo "  Installation complete."
 echo "------------------------------------------"
 echo ""
 echo "Next steps:"
-echo "  1. Add [endstop_phase] and [speed_test] sections to your printer.cfg"
-echo "  2. Run FIRMWARE_RESTART"
-echo "  3. Run SPEED_TEST_STATUS to verify"
+echo "  1. Add a [speed_test] section to your printer.cfg"
+echo "     (do NOT add [endstop_phase] - remove it if present!)"
+echo "  2. Optional UI macros: add  [include speed_test_macros.cfg]"
+echo "  3. Run FIRMWARE_RESTART"
+echo "  4. Run SPEED_TEST_STATUS (or the ST_STATUS macro) to verify"
 echo ""
-echo "See README.md for full configuration."
+echo "See README.md and docs/ for full configuration."
 echo ""

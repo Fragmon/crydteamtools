@@ -13,11 +13,14 @@ either unsafe at higher speeds or needlessly conservative at lower ones.
 
 This test sweeps several velocities and finds the max safe accel at each,
 producing the whole curve plus a balanced `max_velocity` / `max_accel`
-recommendation taken from the **sweet spot** of the curve (the point past which
-buying more speed costs the most acceleration). Each velocity searches the full
-`A_MIN`…`A_MAX` range independently (the binary search costs only ~1 extra probe
-for a wider range), so the result is never capped by a neighbouring point — the
-accel limit doesn't always fall with velocity.
+recommendation taken from the **sweet spot** of the curve — the point with the
+best velocity × acceleration product. On a falling curve that's the real
+trade-off point; on a flat curve it's simply the fastest velocity that still
+holds the acceleration. To avoid pointless stall events,
+each point's search ceiling is capped at **`PREV_CAP` (default +20 %) above the
+previous point's result** — probing 80k when the last point only held 50k is
+unrealistic. If a result lands at that cap, the console says so; set
+`PREV_CAP=0` to always search the full `A_MIN`…`A_MAX` range.
 
 ## Four-stage search per velocity
 
@@ -27,10 +30,14 @@ passes, that velocity is honestly **excluded** rather than reported as safe.
 
 1. **Stage 1 — bracket.** A relative-accuracy **binary search** (no fixed
    step; stops when the guess is within `ACCEL_ACCU` of a bracket bound) using
-   short, stall-safe *jab* moves. Each jab is sized to the motion profile
-   (`V²/A`) and anchored **near home, 10 % into the travel**, so the search is
-   fast, a stall barely grinds, and the re-home stays short. The search ends on
-   a freshly **confirmed** passing value before handing off. (Jab idea adapted
+   short, stall-safe *jab* moves. Each jab reaches V plus a **fixed 50 ms
+   cruise budget** (identical physical test at every velocity, and close to
+   what the stage-3 benchmark demands) and starts **`start_offset` mm from the endstop** (config option; default 20 % of the travel), so the search is
+   fast, a stall barely grinds, and the re-home stays short. Every FAIL is **retested once** before it may shrink the bracket (one noisy
+   measurement can't collapse the search range), and the search ends on a
+   freshly **confirmed** passing value before handing off. Redo rounds
+   **warm-start near the previously proven ceiling** instead of re-climbing
+   from the bottom. (Jab idea adapted
    from Anonoei's [klipper_auto_speed](https://github.com/Anonoei/klipper_auto_speed).)
 2. **Stage 2 — validate.** The candidate is re-tested with the thorough
    reversal-stress pattern (random distances across the axis — where motors
@@ -45,9 +52,8 @@ passes, that velocity is honestly **excluded** rather than reported as safe.
    of the axis** and the run goes in **adaptive sections** that re-home between
    them and **abort on the first lost-step section**, so a stall can't grind
    the whole run into the limit. Sections start short (`BENCH_CHUNK` moves) and
-   each clean one **grows the next by `BENCH_CHUNK_GROW`** (up to 8×). A
-   failure at full current can only mean the **accel is too high** → back to
-   stage 1 with a lowered ceiling. Running the benchmark **before** the current
+   each clean one **grows the next by `BENCH_CHUNK_GROW`** (up to 8×). A failure at full current means the **accel is too high** → back to stage 1
+   with a lowered ceiling. Running the benchmark **before** the current
    trim saves time: a rejected accel wastes no current search.
 4. **Stage 4 — min current** (needs a TMC driver; auto-skipped otherwise). For
    the now benchmark-confirmed `(velocity, accel)`, searches the **lowest
@@ -95,7 +101,8 @@ the originally requested one noted (`requested X, accel-limited`); the CSV adds 
 | `BENCH_DERATE`     | 0.9     | Accepted accel = this fraction of the stage-2 value — safer, fewer crashes |
 | `FULLSPEED_FRAC`   | 0.15    | Minimum fraction of stage-3 benchmark moves that must reach the (effective) target velocity |
 | `MAX_REDO`         | 4       | Re-determination attempts (accel lowered each time) before a velocity is excluded |
-| `FIND_CURRENT`     | 1       | Stage 4 on/off. `1` = trim current per point (needs TMC); `0` = skip |
+| `PREV_CAP`         | 0.20    | Next point's search ceiling = previous result × (1 + this). `0` = always search up to `A_MAX` |
+| `FIND_CURRENT`     | 1       | Stage 4 on/off. `1` = trim current per point (needs TMC); `0` = skip the min-current search — the benchmark still runs at the `max_current` ceiling |
 | `MIN_CURRENT`      | 0.3     | Lower bound of the stage-4 current search (A) |
 | `CURRENT_MARGIN`   | 0.1     | Trimmed current = lowest passing × (1 + this) |
 | `CURRENT_ACCU`     | 0.05    | Stage-4 current search tolerance, *relative*  |

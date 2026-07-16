@@ -17,6 +17,7 @@ import json
 
 MODULE_NAME = "Speed Test"
 MODULE_VERSION = "1.6"
+JAB_CRUISE_TIME = 0.05          # s at V per jab — identical for every V
 SAMPLE_INTERVAL = 0.05          # 20 Hz TMC polling during moves
 TMC_DRIVERS = ['tmc2240', 'tmc5160', 'tmc2209', 'tmc2226',
                'tmc2130', 'tmc2208', 'tmc2660']
@@ -40,6 +41,13 @@ class SpeedTest:
         self.margin = config.getfloat('margin', 20.0, above=0.)
         self.z_pos = config.getfloat('z_pos', 20.0, minval=0.)
         self.monitor_tmc = config.getboolean('monitor_tmc', True)
+        # Distance from the endstop (start of usable travel) where the jab
+        # probes start. 0 = automatic (20% of the usable travel).
+        self.start_offset = config.getfloat('start_offset', 0.0, minval=0.)
+        # Speed/accel used for positioning moves to a test's start point
+        # (never the test values — approaches stay gentle).
+        self.travel_speed = config.getfloat('travel_speed', 100.0, above=0.)
+        self.travel_accel = config.getfloat('travel_accel', 3000.0, above=0.)
         # Skip tolerance in FULL steps across a re-home (~1 step of homing
         # jitter is normal; real stalls lose far more).
         self.max_missed = config.getfloat('max_missed', 1.5, above=0.)
@@ -328,16 +336,24 @@ class SpeedTest:
             "G1 %s%.3f F%.1f" % (axis, pos, feed))
 
     def _park_with_zlift(self, axis, pos, velocity, testbench):
-        """Park the toolhead at `pos` on `axis`. In testbench mode this is
-        a plain axis move (no Z motor); otherwise it lifts Z to z_pos while
-        moving. The Z-lift arm uses raw velocity*60 (no 60 mm/min floor),
-        matching the original inline behaviour."""
+        """Move to a test's start point at the configured travel_speed /
+        travel_accel — never the test values. The active test limits are
+        restored afterwards. Non-testbench also lifts Z to z_pos.
+        (`velocity` is kept in the signature for the callers but the
+        approach itself always uses the travel settings.)"""
+        v_lim, a_lim, _scv = self._current_limits()
+        self._set_limits(velocity=self.travel_speed,
+                         accel=self.travel_accel)
+        feed = self.travel_speed * 60.
         if testbench:
-            self._move_to_axis(axis, pos, velocity)
+            self.gcode.run_script_from_command(
+                "G1 %s%.3f F%.1f" % (axis, pos, feed))
         else:
             self.gcode.run_script_from_command(
                 "G1 %s%.3f Z%.3f F%.1f"
-                % (axis, pos, self.z_pos, velocity * 60.))
+                % (axis, pos, self.z_pos, feed))
+        self.gcode.run_script_from_command("M400")
+        self._set_limits(velocity=v_lim, accel=a_lim)
 
     def _do_velocity_pattern(self, axis, velocity, distance, repeat,
                              testbench=False):
@@ -391,12 +407,16 @@ class SpeedTest:
     def _do_jab_pattern(self, axis, velocity, accel, repeat,
                         testbench=False):
         """Fast stall-safe probe (idea from Anonoei's klipper_auto_speed):
-        short out-and-back of length V²/A (just reaches V), anchored 10%
-        from home — quick to run, and a stall barely grinds."""
+        out-and-back that reaches V plus a FIXED cruise-time budget
+        (JAB_CRUISE_TIME), starting `start_offset` mm from the endstop
+        (default: 20% of the usable travel). The fixed time keeps the
+        physical test identical at every velocity."""
         ax_min, ax_max, ax_mid, ax_range = self._get_axis_bounds(axis)
-        dist = (velocity ** 2) / accel
+        dist = (velocity ** 2) / accel + JAB_CRUISE_TIME * velocity
         dist = max(5.0, min(dist, ax_range))
-        low = ax_min + 0.10 * ax_range
+        offset = (min(self.start_offset, 0.8 * ax_range)
+                  if self.start_offset > 0 else 0.20 * ax_range)
+        low = ax_min + offset
         high = low + dist
         if high > ax_max:
             high = ax_max
@@ -747,14 +767,20 @@ class SpeedTest:
         return low, last_fail_reason, results
 
     def _binary_search_max(self, gcmd, results, low_bound, high_bound,
-                           accuracy, max_iter, label, measure_at):
+                           accuracy, max_iter, label, measure_at,
+                           first_guess=None):
         """Relative-accuracy binary search (no fixed step; stops within
-        `accuracy` of a bound). Ends by re-testing the candidate so the
-        returned value was just confirmed passing — or None if nothing in
-        the bracket can be confirmed."""
+        `accuracy` of a bound). Every FAIL is retested once before it may
+        lower the bracket (a single noisy fail must not collapse the search
+        range), and the final candidate is re-confirmed passing — or None
+        if nothing in the bracket can be confirmed. `first_guess` overrides
+        the default 1/3 starting probe (used by redo rounds to warm-start
+        near the previously proven ceiling)."""
         low = low_bound
         high = high_bound
         guess = low + (high - low) / 3.0
+        if first_guess is not None:
+            guess = min(max(first_guess, low), high)
         last_pass = None
         measured = None
         it = 0
@@ -763,6 +789,15 @@ class SpeedTest:
             r = measure_at(guess, 'search')
             results.append(r)
             valid = not r['failed']
+            if not valid:
+                # Confirm the fail before letting it cut the bracket.
+                r2 = measure_at(guess, 'search')
+                results.append(r2)
+                valid = not r2['failed']
+                if valid:
+                    gcmd.respond_info(
+                        "  ? %s=%.1f failed once but passed the retest — "
+                        "treating as OK (noise)" % (label, guess))
             if valid:
                 last_pass = guess if last_pass is None else max(last_pass,
                                                                 guess)
@@ -1072,6 +1107,9 @@ class SpeedTest:
         bench_derate = gcmd.get_float('BENCH_DERATE', 0.9,
                                       minval=0.5, maxval=1.0)
         max_redo = gcmd.get_int('MAX_REDO', 4, minval=0, maxval=10)
+        # Next point's search ceiling = previous result × (1 + PREV_CAP).
+        # 0 disables the cap (always search up to A_MAX).
+        prev_cap = gcmd.get_float('PREV_CAP', 0.20, minval=0.0, maxval=2.0)
         # Stage 4 current trim (needs TMC; disable with FIND_CURRENT=0).
         find_current = gcmd.get_int('FIND_CURRENT', 1, minval=0, maxval=1)
         min_current = gcmd.get_float('MIN_CURRENT', 0.3, above=0.)
@@ -1119,6 +1157,12 @@ class SpeedTest:
                           and orig_current is not None
                           and current_ceiling is not None
                           and current_ceiling > min_current)
+        # Even with the min-current search disabled, the benchmark still
+        # runs at the config max_current ceiling (not the TMC run_current)
+        # whenever the driver allows switching it.
+        set_bench_current = bool(tmc_info is not None
+                                 and orig_current is not None
+                                 and current_ceiling is not None)
         meta['current_ceiling'] = ('%.3f A' % current_ceiling
                                    if current_ceiling is not None else '—')
         meta['stage4_current'] = 'yes' if do_current else 'no'
@@ -1145,6 +1189,7 @@ class SpeedTest:
         self._ensure_homed([axis], testbench=testbench)
         results = []
         limits = []
+        prev_best = None
 
         try:
             for idx, v in enumerate(v_list):
@@ -1153,18 +1198,26 @@ class SpeedTest:
                 # so A ≥ V²/range. Below that the move never hits v.
                 a_floor = (v * v) / ax_range
                 low = max(a_min, a_floor * 1.05)
-                # Always search the full A_MIN..A_MAX range (the binary
-                # search costs only ~1 extra probe for a wider range). No
-                # warm-start cap — the accel limit does not always fall with
-                # velocity, and capping it underreported the real maximum.
+                # Cap the search ceiling at PREV_CAP above the previous
+                # point's result — probing 80k when the last point only
+                # held 50k just wastes stall events.
                 high = a_max
+                if prev_cap > 0 and prev_best is not None:
+                    capped = prev_best * (1.0 + prev_cap)
+                    if capped < high:
+                        high = capped
+                        gcmd.respond_info(
+                            "  • search ceiling capped to %.0f mm/s² "
+                            "(previous result %.0f + %.0f%%; PREV_CAP=0 "
+                            "disables this)"
+                            % (high, prev_best, prev_cap * 100))
                 if high <= low * (1.0 + accel_accu):
                     gcmd.respond_info(
                         "  ▶ V=%.0f mm/s needs accel ≥ %.0f mm/s² just to "
-                        "reach it within %.0f mm of travel — above A_MAX "
-                        "(%.0f). This velocity isn't reachable on this axis "
-                        "at A_MAX; raise A_MAX or shorten the sweep. Skipped."
-                        % (v, low, ax_range, a_max))
+                        "reach it within %.0f mm of travel — above the "
+                        "ceiling (%.0f). This velocity isn't reachable "
+                        "here; raise A_MAX/PREV_CAP or shorten the sweep. "
+                        "Skipped." % (v, low, ax_range, high))
                     continue
 
                 gcmd.respond_info(
@@ -1186,11 +1239,13 @@ class SpeedTest:
                         mean_dist = (min_dist + (max_dist - min_dist)
                                      / (short_bias + 1.0))
                         mean_cruise = max(0.0, 1.0 - triangle / mean_dist)
+                        # Seed fixed per velocity (not per accel) so redo
+                        # attempts run a comparable pattern.
                         r = self._measure_step(
                             gcmd, [axis], 'A', accel,
                             lambda: self._do_accel_pattern(
                                 axis, _v, min_dist, max_dist, verify_repeats,
-                                seed=seed + int(accel), testbench=testbench,
+                                seed=seed + int(_v), testbench=testbench,
                                 short_bias=short_bias),
                             testbench=testbench, cruise_fraction=mean_cruise)
                     else:
@@ -1217,9 +1272,12 @@ class SpeedTest:
                 best_v_req = None
                 while attempt <= max_redo:
                     # Stage 1: jab bracket.
+                    # Redo rounds warm-start near the lowered ceiling: jabs
+                    # already passed up there, so don't re-climb from 1/3.
                     cand = self._binary_search_max(
                         gcmd, results, low, hi, accel_accu, max_bisect,
-                        'A', measure_at)
+                        'A', measure_at,
+                        first_guess=hi * 0.9 if attempt else None)
                     if cand is None:
                         gcmd.respond_info(
                             "  ✗ V=%.0f mm/s: no accel in [%.0f, %.0f] passes "
@@ -1255,22 +1313,24 @@ class SpeedTest:
                             "velocity capped to the max achievable %.0f mm/s."
                             % (accel_val, v, ax_range, v_eff))
 
-                    # Stage 3: print benchmark at full current — a failure
-                    # can only mean the accel is too high.
+                    # Stage 3: print benchmark at full current (the config
+                    # max_current ceiling) — a failure can only mean the
+                    # accel is too high.
                     bench_cur = None
-                    if do_current:
+                    if set_bench_current:
                         self._set_run_current(axis, current_ceiling)
                         self.gcode.run_script_from_command("G4 P200")
                         bench_cur = self._read_run_current(axis) \
                             or current_ceiling
+                        cur_note = "%.3f A (full)" % bench_cur
+                    else:
+                        cur_note = "configured (no TMC readout)"
                     gcmd.respond_info(
                         "  ──── Stage 3: final benchmark %d+%d moves at "
                         "V=%.0f A=%.0f (≥%.0f%% reach full speed), current "
                         "%s ────"
                         % (bench_short, bench_long, v_eff, accel_val,
-                           fullspeed_frac * 100,
-                           "%.3f A (full)" % bench_cur
-                           if bench_cur is not None else "n/a"))
+                           fullspeed_frac * 100, cur_note))
                     final_failed = self._run_print_benchmark(
                         gcmd, results, axis, v_eff, accel_val,
                         bench_short, bench_long, bench_chunk,
@@ -1282,7 +1342,7 @@ class SpeedTest:
                             "  ↻ Benchmark FAILED at full current → accel too "
                             "high, back to stage 1 below %.0f (attempt %d/%d)"
                             % (hi, attempt, max_redo))
-                        if do_current:
+                        if set_bench_current:
                             self._set_run_current(axis, orig_current)
                         if hi <= low:
                             break
@@ -1340,6 +1400,10 @@ class SpeedTest:
                                     "  ↻ long run failed — raising current "
                                     "to %.3f A." % best_current)
                         self._set_run_current(axis, orig_current)
+                    elif set_bench_current:
+                        # Benchmark ran at the ceiling — restore the
+                        # configured run_current before the next point.
+                        self._set_run_current(axis, orig_current)
 
                     # Passed every stage — accept (v_eff, accel, current).
                     best = accel_val
@@ -1355,6 +1419,13 @@ class SpeedTest:
                     continue
 
                 limits.append((best_v, best, best_current, best_v_req))
+                prev_best = best
+                if (prev_cap > 0 and high < a_max
+                        and best >= high * bench_derate * 0.95):
+                    gcmd.respond_info(
+                        "  • result sits at the +%.0f%% cap — the motor may "
+                        "allow more here (re-run with PREV_CAP=0 to probe)."
+                        % (prev_cap * 100))
                 cur_note = ("" if best_current is None
                             else "  |  run_current %.3f A (was %.3f A)"
                                  % (best_current, orig_current))
@@ -1469,29 +1540,16 @@ class SpeedTest:
             self.gcode.run_script_from_command("G4 P200")
 
     def _find_sweet_spot(self, limits):
-        """Index of the curve's sweet spot — the point past which buying
-        more speed costs the most acceleration (farthest from the chord
-        between first and last sample, in normalized V/A space)."""
-        n = len(limits)
-        if n <= 2:
-            return n - 1
-        vs = [p[0] for p in limits]
-        as_ = [p[1] for p in limits]
-        v0 = vs[0]
-        dv = (vs[-1] - vs[0]) or 1.0
-        amin, amax = min(as_), max(as_)
-        da = (amax - amin) or 1.0
-        na0 = (as_[0] - amin) / da
-        na1 = (as_[-1] - amin) / da
-        slope = na1 - na0
-        denom = math.sqrt(1.0 + slope * slope)
-        best_i, best_d = 0, -1.0
-        for i in range(n):
-            nv = (vs[i] - v0) / dv
-            na = (as_[i] - amin) / da
-            d = abs(nv * slope - (na - na0)) / denom
-            if d > best_d:
-                best_d, best_i = d, i
+        """Index of the best balanced point: the sample with the highest
+        velocity × accel product. On a falling curve that's the real
+        trade-off point; on a flat curve it's the fastest velocity that
+        still holds the acceleration (a chord/knee method breaks down
+        there and would pick a slow point)."""
+        best_i, best_p = 0, -1.0
+        for i, e in enumerate(limits):
+            p = e[0] * e[1]
+            if p > best_p:
+                best_p, best_i = p, i
         return best_i
 
     def _limits_summary(self, gcmd, axis, limits):
@@ -2366,6 +2424,8 @@ new Chart(document.getElementById('envChart'), {
             "TMC SG monitoring: %s\n"
             "Max current cap: %s\n"
             "Skip tolerance (max_missed): %.2f full steps\n"
+            "Test start offset: %s\n"
+            "Travel to start: %.0f mm/s @ %.0f mm/s²\n"
             "Output dir: %s"
             % (MODULE_VERSION, self.structure, self.default_axis,
                "on (only X used, no Y/Z homing)"
@@ -2373,6 +2433,9 @@ new Chart(document.getElementById('envChart'), {
                self.z_pos, self.margin,
                "on" if self.monitor_tmc else "off",
                max_curr_str, self.max_missed,
+               "%.1f mm from endstop" % self.start_offset
+               if self.start_offset > 0 else "auto (20%% of travel)",
+               self.travel_speed, self.travel_accel,
                self.output_dir))
         # Skip detection reads the stepper MCU position directly; the
         # endstop_phase module is not used and must NOT be loaded (it
