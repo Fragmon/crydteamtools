@@ -27,7 +27,7 @@ own README and docs.
 cd ~
 git clone https://github.com/Fragmon/crydteamtools.git
 cd crydteamtools
-./install.sh
+bash ./install.sh
 ```
 
 The installer lets you **pick which plugins to install** (or pass them
