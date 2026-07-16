@@ -13,6 +13,12 @@ set -e
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 KLIPPER_EXTRAS="${HOME}/klipper/klippy/extras"
 CONFIG_DIR="${HOME}/printer_data/config"
+MOONRAKER_CONF="${CONFIG_DIR}/moonraker.conf"
+UPDATER_NAME="crydteamtools"
+GIT_ORIGIN="https://github.com/Fragmon/crydteamtools.git"
+
+# Re-set the executable bit in case a transfer stripped it.
+chmod +x "$0" 2>/dev/null || true
 
 # ─── Plugin registry ──────────────────────────────────────────────
 # id | description | python files (relative) | macro file (optional)
@@ -119,6 +125,33 @@ for id in "${SELECTED[@]}"; do
         echo "  ✓ $(basename "$macro_rel") → ${dst}"
     fi
 done
+
+# ─── Moonraker update manager ─────────────────────────────────────
+# Registers the repo so updates show up in Mainsail/Fluidd's update
+# manager (with the release version from the git tag).
+if [ -f "${MOONRAKER_CONF}" ]; then
+    if grep -q "^\[update_manager ${UPDATER_NAME}\]" "${MOONRAKER_CONF}"; then
+        echo ""
+        echo "  • update manager entry already present in moonraker.conf"
+    else
+        cat <<EOF >> "${MOONRAKER_CONF}"
+
+## Crydteam Tools automatic update management
+[update_manager ${UPDATER_NAME}]
+type: git_repo
+path: ${REPO_DIR}
+origin: ${GIT_ORIGIN}
+primary_branch: main
+managed_services: klipper
+EOF
+        echo ""
+        echo "  ✓ update manager entry added to moonraker.conf"
+        echo "    → restart Moonraker once:  sudo systemctl restart moonraker"
+    fi
+else
+    echo ""
+    echo "  • moonraker.conf not found — skipping update-manager registration"
+fi
 
 echo ""
 echo "------------------------------------------"

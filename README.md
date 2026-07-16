@@ -40,6 +40,12 @@ run `FIRMWARE_RESTART`.
 
 ## Updating
 
+The installer registers the repo with **Moonraker's update manager**, so new
+releases appear directly in Mainsail/Fluidd (Machine → Update Manager) —
+one-click update, Klipper is restarted automatically.
+
+Manual alternative:
+
 ```bash
 cd ~/crydteamtools && git pull
 ```
