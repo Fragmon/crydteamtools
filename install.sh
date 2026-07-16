@@ -1,17 +1,41 @@
 #!/bin/bash
 # Crydteam Tools installer for Klipper
-# Plugin by Steven (Fragmon) — Crydteam
+# by Steven (Fragmon) — Crydteam
 # YouTube: https://www.youtube.com/@crydteamprinting
+#
+# Usage:
+#   ./install.sh                 interactive plugin selection
+#   ./install.sh all             install every plugin
+#   ./install.sh speed_test …    install the named plugin(s)
 
 set -e
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 KLIPPER_EXTRAS="${HOME}/klipper/klippy/extras"
+CONFIG_DIR="${HOME}/printer_data/config"
 
-# Plugin files to symlink
-PLUGINS=(
-    "speed_test.py"
-)
+# ─── Plugin registry ──────────────────────────────────────────────
+# id | description | python files (relative) | macro file (optional)
+PLUGIN_IDS=(speed_test max_flow_test)
+
+plugin_desc() {
+    case "$1" in
+        speed_test)    echo "Speed Test — motor velocity/accel/current limit finder" ;;
+        max_flow_test) echo "TMC Flow Test — extruder max flow rate via StallGuard" ;;
+    esac
+}
+plugin_files() {
+    case "$1" in
+        speed_test)    echo "speed_test/speed_test.py" ;;
+        max_flow_test) echo "max_flow_test/tmc_flow_test.py" ;;
+    esac
+}
+plugin_macros() {
+    case "$1" in
+        speed_test)    echo "speed_test/speed_test_macros.cfg" ;;
+        max_flow_test) echo "max_flow_test/tmc_flow_test_macros.cfg" ;;
+    esac
+}
 
 echo ""
 echo "=========================================="
@@ -19,47 +43,82 @@ echo "  Crydteam Tools — Installer"
 echo "=========================================="
 echo ""
 
-# Check klipper exists
 if [ ! -d "${KLIPPER_EXTRAS}" ]; then
     echo "ERROR: Klipper extras directory not found at:"
     echo "  ${KLIPPER_EXTRAS}"
-    echo ""
     echo "Make sure Klipper is installed at ~/klipper before running this."
     exit 1
 fi
 
-# Symlink each plugin
-for plugin in "${PLUGINS[@]}"; do
-    src="${REPO_DIR}/${plugin}"
-    dst="${KLIPPER_EXTRAS}/${plugin}"
-
-    if [ ! -f "${src}" ]; then
-        echo "  ✗ ${plugin}: source missing at ${src}"
-        continue
+# ─── Select plugins ───────────────────────────────────────────────
+SELECTED=()
+if [ "$#" -gt 0 ]; then
+    if [ "$1" = "all" ]; then
+        SELECTED=("${PLUGIN_IDS[@]}")
+    else
+        for arg in "$@"; do
+            ok=0
+            for id in "${PLUGIN_IDS[@]}"; do
+                [ "$arg" = "$id" ] && ok=1
+            done
+            if [ "$ok" = 1 ]; then SELECTED+=("$arg")
+            else echo "Unknown plugin: $arg  (available: ${PLUGIN_IDS[*]})"; exit 1
+            fi
+        done
     fi
-
-    if [ -L "${dst}" ] || [ -f "${dst}" ]; then
-        echo "  • ${plugin}: replacing existing entry"
-        rm -f "${dst}"
-    fi
-
-    ln -s "${src}" "${dst}"
-    echo "  ✓ ${plugin} → ${dst}"
-done
-
-# UI macros for Mainsail/Fluidd (optional include)
-CONFIG_DIR="${HOME}/printer_data/config"
-if [ -d "${CONFIG_DIR}" ]; then
-    macro_src="${REPO_DIR}/speed_test_macros.cfg"
-    macro_dst="${CONFIG_DIR}/speed_test_macros.cfg"
-    if [ -f "${macro_src}" ]; then
-        if [ -L "${macro_dst}" ] || [ -f "${macro_dst}" ]; then
-            rm -f "${macro_dst}"
-        fi
-        ln -s "${macro_src}" "${macro_dst}"
-        echo "  ✓ speed_test_macros.cfg → ${macro_dst}"
+else
+    echo "Available plugins:"
+    i=1
+    for id in "${PLUGIN_IDS[@]}"; do
+        echo "  $i) $id — $(plugin_desc "$id")"
+        i=$((i+1))
+    done
+    echo "  a) all"
+    echo ""
+    read -r -p "Install which plugins? (numbers separated by spaces, or 'a'): " answer
+    if [ "$answer" = "a" ] || [ "$answer" = "A" ]; then
+        SELECTED=("${PLUGIN_IDS[@]}")
+    else
+        for n in $answer; do
+            idx=$((n-1))
+            if [ "$idx" -ge 0 ] 2>/dev/null && [ "$idx" -lt "${#PLUGIN_IDS[@]}" ]; then
+                SELECTED+=("${PLUGIN_IDS[$idx]}")
+            else
+                echo "Invalid selection: $n"; exit 1
+            fi
+        done
     fi
 fi
+
+if [ "${#SELECTED[@]}" -eq 0 ]; then
+    echo "Nothing selected — aborting."; exit 1
+fi
+
+# ─── Install ──────────────────────────────────────────────────────
+link() {   # link <src> <dst>
+    if [ -L "$2" ] || [ -f "$2" ]; then rm -f "$2"; fi
+    ln -s "$1" "$2"
+}
+
+echo ""
+for id in "${SELECTED[@]}"; do
+    echo "── $id ──"
+    for rel in $(plugin_files "$id"); do
+        src="${REPO_DIR}/${rel}"
+        dst="${KLIPPER_EXTRAS}/$(basename "$rel")"
+        if [ ! -f "$src" ]; then
+            echo "  ✗ missing: $src"; continue
+        fi
+        link "$src" "$dst"
+        echo "  ✓ $(basename "$rel") → ${dst}"
+    done
+    macro_rel="$(plugin_macros "$id")"
+    if [ -n "$macro_rel" ] && [ -f "${REPO_DIR}/${macro_rel}" ] && [ -d "${CONFIG_DIR}" ]; then
+        dst="${CONFIG_DIR}/$(basename "$macro_rel")"
+        link "${REPO_DIR}/${macro_rel}" "$dst"
+        echo "  ✓ $(basename "$macro_rel") → ${dst}"
+    fi
+done
 
 echo ""
 echo "------------------------------------------"
@@ -67,11 +126,17 @@ echo "  Installation complete."
 echo "------------------------------------------"
 echo ""
 echo "Next steps:"
-echo "  1. Add a [speed_test] section to your printer.cfg"
-echo "     (do NOT add [endstop_phase] - remove it if present!)"
-echo "  2. Optional UI macros: add  [include speed_test_macros.cfg]"
-echo "  3. Run FIRMWARE_RESTART"
-echo "  4. Run SPEED_TEST_STATUS (or the ST_STATUS macro) to verify"
+for id in "${SELECTED[@]}"; do
+    case "$id" in
+        speed_test)
+            echo "  speed_test:    add a [speed_test] section to printer.cfg"
+            echo "                 optional macros: [include speed_test_macros.cfg]" ;;
+        max_flow_test)
+            echo "  max_flow_test: add a [tmc_flow_test] section to printer.cfg"
+            echo "                 optional macros: [include tmc_flow_test_macros.cfg]" ;;
+    esac
+done
+echo "  then: FIRMWARE_RESTART"
 echo ""
-echo "See README.md and docs/ for full configuration."
+echo "Docs: see the README.md inside each plugin folder."
 echo ""

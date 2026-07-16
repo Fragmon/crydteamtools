@@ -170,19 +170,9 @@ pass/fail. Useful for regression-testing after changes.
 
 ## `SPEED_TEST_GUI`
 
-Writes a **beginner-friendly control panel** (`speed_test_gui.html`) into the
-output directory, with your live config baked in (testbench mode, current cap,
-TMC driver, and an `[endstop_phase]` warning if it is still loaded).
-
-Open it via your web UI's config file browser (Speedtest folder) or any
-browser. It walks you through: setup checklist → pick a test → presets
-(Quick / Standard / Thorough) → settings with plain-language help → a live
-command preview with **Copy** and an optional **Send to printer** button
-(direct Moonraker call; needs your browser origin in `cors_domains`,
-otherwise just copy & paste into the console).
-
-Re-run `SPEED_TEST_GUI` after config changes to refresh the baked-in values.
-Also available as the `ST_GUI` macro.
+Writes the **beginner-friendly control panel** into the output directory —
+see the dedicated page: **[Control panel (GUI)](gui.md)**. Also available as
+the `ST_GUI` macro.
 
 ---
 
@@ -190,5 +180,4 @@ Also available as the `ST_GUI` macro.
 
 Diagnostic. Prints structure, default axis, axis bounds, TMC presence +
 run_current per axis, the `max_missed` skip tolerance, and whether the stepper
-position is readable. It also **warns if `[endstop_phase]` is loaded** (which
-must be removed — see [Configuration](configuration.md)).
+position is readable.

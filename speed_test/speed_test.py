@@ -1,7 +1,6 @@
 # Speed Test — Adaptive max velocity / accel / SCV detection for steppers
 # Detects skipped steps by reading the stepper MCU position directly
-# (no endstop_phase module needed) and narrows the safe limit with
-# adaptive bracket search.
+# and narrows the safe limit with adaptive bracket search.
 #
 # Plugin by Steven (Fragmon) — Crydteam
 # YouTube: https://www.youtube.com/@crydteamprinting
@@ -205,7 +204,7 @@ class SpeedTest:
 
     def _read_mcu_pos(self, axis):
         """Read the stepper's raw MCU step position straight from the
-        kinematics — no endstop_phase needed. Each unit is one microstep,
+        kinematics. Each unit is one microstep,
         so a full motor step = `microsteps` units."""
         try:
             toolhead = self.printer.lookup_object('toolhead')
@@ -229,9 +228,7 @@ class SpeedTest:
 
         Compares the stepper MCU position before/after a re-home. A shift
         larger than max_missed full steps (converted to microsteps) is a
-        skip. Reading the position directly avoids the endstop_phase
-        module, which aborts homing with 'incorrect phase' the moment a
-        step is lost — exactly what we want to measure, not crash on.
+        skip.
         """
         skips = []
         for axis in axes:
@@ -247,18 +244,6 @@ class SpeedTest:
         return skips
 
     def _check_ready(self):
-        # Skip detection reads the stepper MCU position directly, so no
-        # endstop_phase module is required. If it IS loaded, warn: it
-        # aborts homing with "incorrect phase" as soon as the motor loses
-        # a step (its TMC phase cross-check), which kills the test.
-        ep = self.printer.lookup_object('endstop_phase', None)
-        if ep is not None:
-            self.gcode.respond_info(
-                "speed_test: WARNING — [endstop_phase] is configured. It "
-                "aborts homing with 'incorrect phase' the moment the motor "
-                "loses a step, which will abort this test. Remove "
-                "[endstop_phase] (and any [endstop_phase stepper_*]) from "
-                "printer.cfg and FIRMWARE_RESTART.")
         if self._read_mcu_pos(self.default_axis) is None:
             raise self.gcode.error(
                 "speed_test: cannot read the %s stepper MCU position. "
@@ -2439,8 +2424,6 @@ new Chart(document.getElementById('envChart'), {
             'output_dir': self.output_dir,
             'tmc': tmc_info[0] if tmc_info else None,
             'run_current': round(cur, 3) if cur is not None else None,
-            'endstop_phase': self.printer.lookup_object(
-                'endstop_phase', None) is not None,
         }
         html = html.replace('/*CFG*/null', json.dumps(cfg))
         os.makedirs(self.output_dir, exist_ok=True)
@@ -2479,17 +2462,10 @@ new Chart(document.getElementById('envChart'), {
                if self.start_offset > 0 else "auto (20%% of travel)",
                self.travel_speed, self.travel_accel,
                self.output_dir))
-        # Skip detection reads the stepper MCU position directly; the
-        # endstop_phase module is not used and must NOT be loaded (it
-        # aborts homing on the first lost step).
-        ep = self.printer.lookup_object('endstop_phase', None)
         mcu_ok = self._read_mcu_pos(self.default_axis) is not None
         gcmd.respond_info(
-            "Skip detection: direct stepper MCU position (%s)\n"
-            "endstop_phase module: %s"
-            % ("readable ✓" if mcu_ok else "NOT readable ✗",
-               "PRESENT ✗ — remove it, it will abort the test"
-               if ep is not None else "absent ✓ (correct)"))
+            "Skip detection: direct stepper MCU position (%s)"
+            % ("readable ✓" if mcu_ok else "NOT readable ✗"))
         for axis in ('X', 'Y'):
             try:
                 lo, hi, mid, rng = self._get_axis_bounds(axis)

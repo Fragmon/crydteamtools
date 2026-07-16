@@ -123,11 +123,6 @@ kbd{ background:#eef2f8; border:1px solid var(--line); border-radius:5px;
      validation &middot; 3: a simulated print at full current is the final
      judge &middot; 4: the lowest motor current that still holds the point
      (cooler motor), confirmed with one more long run.</p>
-  <h3>"Endstop … incorrect phase" error?</h3>
-  <p>Remove <kbd>[endstop_phase]</kbd> (and any
-     <kbd>[endstop_phase stepper_*]</kbd>) from printer.cfg and restart —
-     the plugin detects lost steps without it, and that module aborts homing
-     exactly when a step is lost.</p>
   <h3>Results differ a lot between runs?</h3>
   <p>Motor temperature matters. Let the motor cool between runs and compare
      runs made under the same conditions. Also make sure belts and grub
@@ -256,7 +251,7 @@ const TESTS = {
     cmd:'SPEED_TEST_STATUS', name:'Status check',
     blurb:'Show config, axes and warnings — run this first',
     desc:'Prints the plugin configuration, axis ranges, TMC drivers and '
-        +'warnings (like a leftover [endstop_phase]). Always safe.',
+        +'warnings. Always safe.',
     fields:[], presets:{}},
 };
 
@@ -272,10 +267,6 @@ function renderChecks(){
       +'<kbd>SPEED_TEST_GUI</kbd> on the printer to regenerate this page '
       +'with your current config baked in.</li>');
   } else {
-    li.push('<li>'+(CFG.endstop_phase
-      ? '<span class="warn">&#10007; [endstop_phase] is loaded — remove it '
-        +'from printer.cfg and FIRMWARE_RESTART, it aborts the test!</span>'
-      : '<span class="ok">&#10003;</span> [endstop_phase] not loaded (correct)')+'</li>');
     li.push('<li><span class="ok">&#10003;</span> Testbench mode: <b>'
       +(CFG.testbench?'ON (single motor on X)':'off (full printer)')+'</b></li>');
     li.push('<li>'+(CFG.max_current>0

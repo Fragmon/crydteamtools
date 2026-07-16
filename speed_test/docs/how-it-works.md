@@ -9,13 +9,8 @@ kinematics (`get_mcu_position`) right after each re-home, and compares it with
 the position before the test move. A shift larger than `max_missed` full steps
 means the motor lost steps.
 
-Reading the position directly means **no `[endstop_phase]` module is needed** —
-and crucially, it can't be present: `endstop_phase` cross-checks the TMC
-microstep phase and aborts homing with `incorrect phase` the instant a step is
-lost, which is exactly the event this test is built to measure.
-
-About `max_missed`: without `endstop_phase`'s phase-snapping, a home can land up
-to ~1 full step off purely from mechanical jitter, so the default tolerance of
+About `max_missed`: a home can land up to ~1 full step off purely from
+mechanical jitter, so the default tolerance of
 1.5 full steps leaves headroom. A real stall loses tens to thousands of
 microsteps — far above the threshold.
 

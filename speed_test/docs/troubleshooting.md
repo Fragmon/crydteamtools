@@ -2,14 +2,6 @@
 
 [← back to README](../README.md)
 
-## "Endstop stepper_x incorrect phase (got … vs …)"
-
-`[endstop_phase]` is loaded. It aborts homing the moment the motor loses a step
-— which the test does on purpose. **Remove `[endstop_phase]` and any
-`[endstop_phase stepper_*]` from `printer.cfg` and `FIRMWARE_RESTART`.** The
-plugin detects skips without it. `SPEED_TEST_STATUS` warns when it's still
-present.
-
 ## Tests always pass even at obviously-too-high values
 
 - Check that your endstop is a physical switch that homes repeatably (sensorless

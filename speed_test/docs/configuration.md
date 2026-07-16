@@ -2,15 +2,6 @@
 
 [← back to README](../README.md)
 
-## Do NOT enable `endstop_phase`
-
-Skipped-step detection reads the stepper's MCU step position directly after
-each re-home — **no `[endstop_phase]` is needed**. If `[endstop_phase]` (or
-any `[endstop_phase stepper_*]`) is configured, **remove it** and
-`FIRMWARE_RESTART`: its TMC phase cross-check raises `Endstop … incorrect
-phase` and aborts homing exactly when the motor loses a step — which is the
-event the test is built to detect. `SPEED_TEST_STATUS` warns if it's loaded.
-
 ## `[speed_test]` section
 
 ```ini
@@ -82,5 +73,4 @@ SPEED_TEST_FIND_MAX_ACCEL    AXIS=X TESTBENCH=1 SPEED=200
 `TESTBENCH=0` forces it off even when the config has `testbench: True`.
 
 All you need wired is a working X endstop so `G28 X` homes repeatably — the
-plugin reads the X stepper position directly, so no `[endstop_phase]` setup
-is required (and it should not be present).
+plugin reads the X stepper position directly.

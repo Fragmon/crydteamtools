@@ -1,6 +1,6 @@
-# Crydteam Tools for Klipper
+# Speed Test
 
-A collection of Klipper diagnostic and tuning plugins by **Steven (Fragmon) — Crydteam**.
+*Part of [Crydteam Tools](../README.md) — Klipper plugins by Steven (Fragmon).*
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Klipper](https://img.shields.io/badge/Klipper-compatible-green.svg)](https://www.klipper3d.org/)
@@ -8,13 +8,11 @@ A collection of Klipper diagnostic and tuning plugins by **Steven (Fragmon) — 
 
 ---
 
-## `speed_test.py`
-
 **Adaptive max velocity / acceleration / square-corner-velocity finder for stepper motors**, plus a combined **velocity–acceleration limit map** that also trims motor current.
 
-It pushes a motor until it loses steps, then narrows in on the safe limit with an adaptive bracket search (≈ 8–12 measurements instead of dozens). Skipped steps are detected by reading the stepper's MCU position directly after a re-home — **no `[endstop_phase]` needed** (and it must not be loaded). Every run saves a CSV + interactive HTML report.
+It pushes a motor until it loses steps, then narrows in on the safe limit with an adaptive bracket search (≈ 8–12 measurements instead of dozens). Skipped steps are detected by reading the stepper's MCU position directly after a re-home. Every run saves a CSV + interactive HTML report.
 
-> Looking for the extruder StallGuard flow test? That's in a separate repo: [klipper_max_flow_test](https://github.com/Fragmon/klipper_max_flow_test).
+> Looking for the extruder StallGuard flow test? It lives in this repo too: [TMC Flow Test](../max_flow_test/README.md).
 
 ---
 
@@ -22,7 +20,6 @@ It pushes a motor until it loses steps, then narrows in on the safe limit with a
 
 - Klipper or Kalico
 - An endstop that homes repeatably (a physical switch is best)
-- **`[endstop_phase]` must NOT be loaded** — it aborts homing the moment the motor loses a step. [Why →](docs/configuration.md#do-not-enable-endstop_phase)
 - Optional: TMC drivers for StallGuard monitoring and current trimming
 
 ## Installation
@@ -30,10 +27,14 @@ It pushes a motor until it loses steps, then narrows in on the safe limit with a
 ```bash
 cd ~
 git clone https://github.com/Fragmon/crydteamtools.git
-ln -sf ~/crydteamtools/speed_test.py ~/klipper/klippy/extras/speed_test.py
+cd crydteamtools
+./install.sh speed_test
 ```
 
-Add the config below, then `FIRMWARE_RESTART`. (Or run `./install.sh`.)
+(or manually: `ln -sf ~/crydteamtools/speed_test/speed_test.py
+~/klipper/klippy/extras/speed_test.py`)
+
+Add the config below, then `FIRMWARE_RESTART`.
 
 ## Minimal config
 
@@ -44,8 +45,8 @@ default_axis: X
 max_current: 1.5         # safety cap (A) for current tests; 0 = no cap
 ```
 
-Then run `SPEED_TEST_STATUS` to confirm it loaded. Full options, testbench mode,
-and the `[endstop_phase]` note: **[Configuration →](docs/configuration.md)**
+Then run `SPEED_TEST_STATUS` to confirm it loaded. Full options and testbench
+mode: **[Configuration →](docs/configuration.md)**
 
 ---
 
@@ -60,20 +61,34 @@ and the `[endstop_phase]` note: **[Configuration →](docs/configuration.md)**
 | [`SPEED_TEST_FIND_OPTIMAL_CURRENT`](docs/commands.md#speed_test_find_optimal_current) | Lowest `run_current` that still hits a speed/accel target |
 | [`SPEED_TEST_BENCHMARK`](docs/commands.md#speed_test_benchmark) | Repeatable pass/fail stress test |
 | [`SPEED_TEST_STATUS`](docs/commands.md#speed_test_status) | Diagnostic — config, axes, TMC, warnings |
+| [`SPEED_TEST_GUI`](docs/gui.md) | Writes the **control panel** (see below) |
 
 ### Quick start
 
 ```
 SPEED_TEST_STATUS                              # check config first
-SPEED_TEST_FIND_LIMITS AXIS=X                # the combined sweep
+SPEED_TEST_FIND_LIMITS AXIS=X                  # the combined sweep
 SPEED_TEST_FIND_MAX_ACCEL AXIS=X SPEED=200     # a single accel test
 ```
 
 ---
 
+## Control panel (GUI)
+
+New to the plugin? Run **`SPEED_TEST_GUI`** — it writes a beginner-friendly
+web page into the Speedtest folder that builds the commands for you: a setup
+checklist with your live config, test cards, presets (Quick / Standard /
+Thorough), plain-language help on every field, and a **Copy** /
+**Send to printer** button for the finished command.
+
+**[How to use it →](docs/gui.md)**
+
+---
+
 ## Documentation
 
-- **[Configuration](docs/configuration.md)** — all options, testbench mode, the `[endstop_phase]` rule
+- **[Control panel (GUI)](docs/gui.md)** — the beginner-friendly launcher, step by step
+- **[Configuration](docs/configuration.md)** — all options, testbench mode
 - **[V/A limits](docs/limits.md)** — the combined sweep, four-stage search, parameters
 - **[Command reference](docs/commands.md)** — full parameter tables for the single-axis / utility commands
 - **[How it works](docs/how-it-works.md)** — skip detection, adaptive search, TMC monitoring, cruise-aware sizing
