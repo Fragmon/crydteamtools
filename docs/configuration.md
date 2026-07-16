@@ -43,7 +43,8 @@ and your axes are recognised.
 
 The repo ships `speed_test_macros.cfg` with one `[gcode_macro]` per test
 (`ST_FIND_LIMITS`, `ST_FIND_MAX_VELOCITY`, `ST_FIND_MAX_ACCEL`,
-`ST_FIND_MAX_SCV`, `ST_FIND_OPTIMAL_CURRENT`, `ST_BENCHMARK`, `ST_STATUS`).
+`ST_FIND_MAX_SCV`, `ST_FIND_OPTIMAL_CURRENT`, `ST_BENCHMARK`, `ST_STATUS`,
+`ST_GUI`).
 They show up in the web UI's macro panel **with input fields for every
 parameter**; empty fields are not passed on, so the plugin defaults and your
 `[speed_test]` config stay in charge. `install.sh` links the file into

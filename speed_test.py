@@ -101,6 +101,11 @@ class SpeedTest:
             self.cmd_FIND_LIMITS,
             desc='Deprecated alias for SPEED_TEST_FIND_LIMITS')
         self.gcode.register_command(
+            'SPEED_TEST_GUI',
+            self.cmd_GUI,
+            desc='Write the beginner-friendly control panel (HTML) with '
+                 'live config values into the output directory')
+        self.gcode.register_command(
             'SPEED_TEST_FIND_OPTIMAL_CURRENT',
             self.cmd_FIND_OPTIMAL_CURRENT,
             desc='Find the lowest TMC run_current that still passes '
@@ -2410,6 +2415,43 @@ new Chart(document.getElementById('envChart'), {
         self._save_report(results, meta, timestamp,
                           "verify failed" if verify_failed else None,
                           no_html, 'current', gcmd)
+
+    def cmd_GUI(self, gcmd):
+        """Write the interactive control panel (speed_test_gui.html) into
+        the output directory, with the live config baked in."""
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                           'speed_test_gui.html')
+        if not os.path.isfile(src):
+            raise gcmd.error(
+                "speed_test: GUI template not found at %s — pull the "
+                "latest crydteamtools repo." % src)
+        with open(src, encoding='utf-8') as f:
+            html = f.read()
+        tmc_info = self._lookup_tmc_for_axis(self.default_axis)
+        cur = self._read_run_current(self.default_axis) if tmc_info else None
+        cfg = {
+            'axis': self.default_axis,
+            'testbench': bool(self.testbench_default),
+            'max_current': self.max_current,
+            'start_offset': self.start_offset,
+            'travel_speed': self.travel_speed,
+            'travel_accel': self.travel_accel,
+            'output_dir': self.output_dir,
+            'tmc': tmc_info[0] if tmc_info else None,
+            'run_current': round(cur, 3) if cur is not None else None,
+            'endstop_phase': self.printer.lookup_object(
+                'endstop_phase', None) is not None,
+        }
+        html = html.replace('/*CFG*/null', json.dumps(cfg))
+        os.makedirs(self.output_dir, exist_ok=True)
+        dst = os.path.join(self.output_dir, 'speed_test_gui.html')
+        with open(dst, 'w', encoding='utf-8') as f:
+            f.write(html)
+        gcmd.respond_info(
+            "Control panel written to:\n  %s\n"
+            "Open it via your web UI's config file browser (Speedtest "
+            "folder) or any browser. Re-run SPEED_TEST_GUI after config "
+            "changes to refresh the baked-in values." % dst)
 
     def cmd_STATUS(self, gcmd):
         max_curr_str = ("%.3f A" % self.max_current

@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Speed Test — Control Panel</title>
+<style>
+:root{ --bg:#eef2f9; --card:#fff; --ink:#1f2733; --muted:#6b7787;
+  --blue:#1565c0; --blue2:#1e88e5; --green:#2e9e5b; --amber:#b8860b;
+  --red:#b3261e; --line:#e6ebf3; }
+*{ box-sizing:border-box; }
+body{ font-family:'Segoe UI',system-ui,sans-serif; background:var(--bg);
+  color:var(--ink); margin:0; padding:0 16px 60px; line-height:1.55; }
+.wrap{ max-width:920px; margin:0 auto; }
+header.hero{ background:linear-gradient(135deg,#1565c0,#42a5f5); color:#fff;
+  border-radius:0 0 18px 18px; padding:24px 26px 20px; margin:0 -16px 22px;
+  box-shadow:0 8px 22px rgba(21,101,192,.28); }
+header.hero h1{ margin:0; font-size:22px; }
+header.hero .sub{ margin-top:6px; font-size:13px; opacity:.92; }
+.card{ background:var(--card); border-radius:14px; padding:18px 20px;
+  margin-bottom:18px; box-shadow:0 2px 12px rgba(20,40,80,.06);
+  border:1px solid var(--line); }
+.card h2{ margin:0 0 6px; font-size:16px; color:var(--blue); }
+.card .lead{ margin:0 0 12px; color:var(--muted); font-size:13.5px; }
+.step{ display:inline-block; background:var(--blue); color:#fff;
+  border-radius:50%; width:22px; height:22px; text-align:center;
+  line-height:22px; font-size:13px; font-weight:700; margin-right:8px; }
+.checks li{ margin:6px 0; font-size:14px; }
+.ok{ color:var(--green); font-weight:600; } .warn{ color:var(--red); font-weight:600; }
+.testgrid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+  gap:10px; }
+.testcard{ border:2px solid var(--line); border-radius:11px; padding:12px 14px;
+  cursor:pointer; transition:border-color .12s, background .12s; }
+.testcard:hover{ border-color:#b9cfec; }
+.testcard.sel{ border-color:var(--blue2); background:#f2f8ff; }
+.testcard b{ display:block; font-size:14px; }
+.testcard span{ font-size:12px; color:var(--muted); }
+.badge{ display:inline-block; font-size:10.5px; font-weight:700;
+  letter-spacing:.4px; padding:2px 8px; border-radius:20px; margin-left:6px;
+  background:#e2efe6; color:var(--green); vertical-align:2px; }
+.presets{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
+.presets button{ font-size:13px; padding:7px 14px; border:1.5px solid var(--line);
+  border-radius:20px; background:#fbfcfe; cursor:pointer; }
+.presets button.sel{ border-color:var(--blue2); background:#f2f8ff;
+  color:var(--blue); font-weight:600; }
+.fields{ display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr));
+  gap:12px 16px; }
+.field label{ display:block; font-weight:600; font-size:13px; margin-bottom:3px; }
+.field input, .field select{ width:100%; font-size:14px; padding:7px 10px;
+  border:1px solid #cfd6e0; border-radius:8px; background:#fbfcfe; }
+.field .hint{ display:block; margin-top:3px; color:var(--muted); font-size:11.5px; }
+details{ margin-top:12px; }
+details summary{ cursor:pointer; font-size:13px; color:var(--blue);
+  font-weight:600; }
+details .fields{ margin-top:12px; }
+.cmdbox{ background:#101826; color:#d7e3f4; border-radius:10px; padding:14px 16px;
+  font-family:Consolas,monospace; font-size:13px; word-break:break-all;
+  min-height:44px; }
+.actions{ display:flex; gap:10px; margin-top:12px; flex-wrap:wrap; }
+.actions button{ font-size:14px; font-weight:600; padding:9px 18px; border:none;
+  border-radius:9px; cursor:pointer; }
+#copybtn{ background:var(--blue); color:#fff; }
+#sendbtn{ background:var(--green); color:#fff; }
+.actions button:active{ transform:scale(.97); }
+.moonrow{ display:flex; gap:8px; align-items:center; margin-top:10px;
+  font-size:12.5px; color:var(--muted); flex-wrap:wrap; }
+.moonrow input{ font-size:13px; padding:6px 9px; border:1px solid #cfd6e0;
+  border-radius:8px; width:230px; }
+#sendmsg{ font-size:12.5px; margin-top:6px; }
+.faq h3{ font-size:13.5px; margin:14px 0 4px; }
+.faq p{ margin:0; font-size:13px; color:var(--muted); }
+kbd{ background:#eef2f8; border:1px solid var(--line); border-radius:5px;
+  padding:1px 6px; font-size:12px; font-family:Consolas,monospace; }
+</style></head><body>
+<div class="wrap">
+<header class="hero">
+  <h1>&#9889; Speed Test &middot; Control Panel</h1>
+  <div class="sub">Beginner-friendly launcher for the Crydteam speed_test
+    plugin &middot; pick a test, tune the basics, copy or send the command.</div>
+</header>
+
+<div class="card" id="setupcard">
+  <h2><span class="step">1</span>Before you start</h2>
+  <ul class="checks" id="checks"></ul>
+</div>
+
+<div class="card">
+  <h2><span class="step">2</span>What do you want to test?</h2>
+  <p class="lead">Not sure? Take the <b>limit map</b> — it finds everything
+    (max accel per speed, plus the lowest motor current) in one run.</p>
+  <div class="testgrid" id="testgrid"></div>
+</div>
+
+<div class="card">
+  <h2><span class="step">3</span>Settings</h2>
+  <p class="lead" id="testdesc"></p>
+  <div class="presets" id="presets"></div>
+  <div class="fields" id="basicfields"></div>
+  <details id="advdetails"><summary>Advanced settings (safe to ignore)</summary>
+    <div class="fields" id="advfields"></div>
+  </details>
+</div>
+
+<div class="card">
+  <h2><span class="step">4</span>Run it</h2>
+  <div class="cmdbox" id="cmdbox"></div>
+  <div class="actions">
+    <button id="copybtn" type="button">&#128203; Copy command</button>
+    <button id="sendbtn" type="button">&#9654; Send to printer</button>
+  </div>
+  <div class="moonrow">
+    <span>Moonraker URL:</span>
+    <input id="moonurl" type="text" />
+    <span>(sending needs your browser origin in Moonraker's
+      <kbd>cors_domains</kbd> — otherwise use Copy &amp; paste into the
+      console)</span>
+  </div>
+  <div id="sendmsg"></div>
+</div>
+
+<div class="card faq">
+  <h2>&#10067; Help</h2>
+  <h3>What do the stages of the limit map mean?</h3>
+  <p>1: fast probe search brackets the accel limit &middot; 2: reversal-stress
+     validation &middot; 3: a simulated print at full current is the final
+     judge &middot; 4: the lowest motor current that still holds the point
+     (cooler motor), confirmed with one more long run.</p>
+  <h3>"Endstop … incorrect phase" error?</h3>
+  <p>Remove <kbd>[endstop_phase]</kbd> (and any
+     <kbd>[endstop_phase stepper_*]</kbd>) from printer.cfg and restart —
+     the plugin detects lost steps without it, and that module aborts homing
+     exactly when a step is lost.</p>
+  <h3>Results differ a lot between runs?</h3>
+  <p>Motor temperature matters. Let the motor cool between runs and compare
+     runs made under the same conditions. Also make sure belts and grub
+     screws are tight.</p>
+  <h3>Where are my results?</h3>
+  <p>Every run saves a CSV and an interactive HTML report into the Speedtest
+     folder inside your config directory. Open the HTML in a browser.</p>
+  <h3>Testbench mode?</h3>
+  <p>For a single motor on a bench (only X wired): set
+     <kbd>testbench: True</kbd> in <kbd>[speed_test]</kbd> or add
+     <kbd>TESTBENCH=1</kbd>. Only X is homed and checked.</p>
+</div>
+
+<div style="text-align:center;color:var(--muted);font-size:12px">
+  Plugin by Steven (Fragmon) — Crydteam &middot; regenerate this page any time
+  with <kbd>SPEED_TEST_GUI</kbd></div>
+</div>
+
+<script>
+const CFG = /*CFG*/null;
+
+const F = (n,l,d,h,adv) => ({n,l,d,h,adv:!!adv});
+const TESTS = {
+  LIMITS: {
+    cmd:'SPEED_TEST_FIND_LIMITS', name:'Limit map', rec:true,
+    blurb:'Full picture: max accel at several speeds + lowest motor current',
+    desc:'Sweeps a range of speeds, finds the max safe acceleration at each, '
+        +'confirms every value with a simulated print, then finds the lowest '
+        +'motor current that still holds it. Takes a while, tells you everything.',
+    fields:[
+      F('AXIS','Axis','X','Which axis / motor to test'),
+      F('V_MIN','Slowest speed (mm/s)','100','Start of the speed sweep'),
+      F('V_MAX','Fastest speed (mm/s)','500','End of the speed sweep — use what you realistically print/travel at'),
+      F('V_POINTS','Speed points','5','How many speeds between min and max (more = finer curve, longer run)'),
+      F('A_MAX','Accel search ceiling (mm/s²)','50000','The search never probes above this — raise for strong motors'),
+      F('FIND_CURRENT','Find lowest current','1','1 = also find the coolest motor current per point (needs TMC), 0 = skip'),
+      F('A_MIN','Accel search floor (mm/s²)','1000','',1),
+      F('ACCEL_ACCU','Search precision (±fraction)','0.05','0.05 = stop within 5% of the limit',1),
+      F('REPEAT','Probe moves per step','15','',1),
+      F('VERIFY_REPEATS','Validation moves','30','',1),
+      F('BENCH_SHORT','Benchmark infill moves','400','',1),
+      F('BENCH_LONG','Benchmark travel moves','60','',1),
+      F('BENCH_DERATE','Safety derate','0.9','Accepted accel = this fraction of the found value',1),
+      F('PREV_CAP','Next-point overshoot cap','0.20','Next speed may search max this much above the last result (0 = off)',1),
+      F('MAX_REDO','Retry attempts','4','',1),
+      F('TESTBENCH','Testbench mode','','1 = single motor on X, no Y/Z (empty = use config)',1),
+      F('SEED','Random seed','12345','',1),
+    ],
+    presets:{
+      'Quick look (~15 min)':{V_POINTS:'3',BENCH_SHORT:'120',BENCH_LONG:'20',FIND_CURRENT:'0'},
+      'Standard':{},
+      'Thorough':{V_POINTS:'8',VERIFY_REPEATS:'50',ACCEL_ACCU:'0.03'},
+    }},
+  VEL: {
+    cmd:'SPEED_TEST_FIND_MAX_VELOCITY', name:'Max velocity',
+    blurb:'Highest safe speed for one axis',
+    desc:'Finds the fastest speed the motor can hold without losing steps.',
+    fields:[
+      F('AXIS','Axis','X',''),
+      F('MIN','Lowest speed (mm/s)','50',''),
+      F('MAX','Highest speed (mm/s)','500',''),
+      F('ACCEL','Acceleration (mm/s²)','','Empty = automatic'),
+      F('COARSE_STEP','Coarse step (mm/s)','25','',1),
+      F('MIN_STEP','Precision (mm/s)','5','',1),
+      F('REPEAT','Moves per step','5','',1),
+      F('VERIFY_REPEATS','Verification moves','20','',1),
+      F('TESTBENCH','Testbench mode','','1 = bench, empty = config',1),
+    ],
+    presets:{'Standard':{}, 'High-speed range':{MIN:'200',MAX:'1000'}}},
+  ACC: {
+    cmd:'SPEED_TEST_FIND_MAX_ACCEL', name:'Max accel',
+    blurb:'Highest safe acceleration at one fixed speed',
+    desc:'Finds the max acceleration at a single speed using reversal-stress moves.',
+    fields:[
+      F('AXIS','Axis','X',''),
+      F('SPEED','Test speed (mm/s)','200','The speed at which accel is tested'),
+      F('MIN','Accel floor (mm/s²)','500',''),
+      F('MAX','Accel ceiling (mm/s²)','50000',''),
+      F('COARSE_STEP','Coarse step','2500','',1),
+      F('MIN_STEP','Precision','250','',1),
+      F('REPEAT','Moves per step','30','',1),
+      F('VERIFY_REPEATS','Verification moves','50','',1),
+      F('TESTBENCH','Testbench mode','','',1),
+    ],
+    presets:{'Standard':{}}},
+  SCV: {
+    cmd:'SPEED_TEST_FIND_MAX_SCV', name:'Max corner speed',
+    blurb:'Square-corner velocity — needs X and Y',
+    desc:'Drives square + zigzag corner patterns to find the max safe '
+        +'square_corner_velocity. Not available in testbench mode.',
+    fields:[
+      F('SPEED','Pattern speed (mm/s)','200',''),
+      F('ACCEL','Acceleration (mm/s²)','5000',''),
+      F('MIN','SCV floor (mm/s)','1','',1),
+      F('MAX','SCV ceiling (mm/s)','20','',1),
+      F('CORNER_SIZE','Pattern size (mm)','50','',1),
+    ],
+    presets:{'Standard':{}}},
+  CUR: {
+    cmd:'SPEED_TEST_FIND_OPTIMAL_CURRENT', name:'Optimal current',
+    blurb:'Lowest run_current for a speed/accel target',
+    desc:'Finds the lowest TMC run_current that still passes your target — '
+        +'a cooler, quieter motor. Tip: the limit map does this automatically.',
+    fields:[
+      F('AXIS','Axis','X',''),
+      F('SPEED','Target speed (mm/s)','200',''),
+      F('ACCEL','Target accel (mm/s²)','5000',''),
+      F('MIN_CURRENT','Search floor (A)','0.3','',1),
+      F('SAFETY_MARGIN','Safety margin','0.10','Result = lowest passing × (1+this)',1),
+      F('TESTBENCH','Testbench mode','','',1),
+    ],
+    presets:{'Standard':{}}},
+  BENCH: {
+    cmd:'SPEED_TEST_BENCHMARK', name:'Benchmark',
+    blurb:'Repeatable pass/fail stress test — needs X and Y',
+    desc:'Runs a fixed stress pattern and reports pass/fail. Good for '
+        +'regression tests after changes.',
+    fields:[
+      F('SPEED','Speed (mm/s)','300',''),
+      F('ACCEL','Accel (mm/s²)','10000',''),
+      F('SCV','Corner speed (mm/s)','5','',1),
+      F('ITERATIONS','Repetitions','3','',1),
+    ],
+    presets:{'Standard':{}}},
+  STATUS: {
+    cmd:'SPEED_TEST_STATUS', name:'Status check',
+    blurb:'Show config, axes and warnings — run this first',
+    desc:'Prints the plugin configuration, axis ranges, TMC drivers and '
+        +'warnings (like a leftover [endstop_phase]). Always safe.',
+    fields:[], presets:{}},
+};
+
+let sel='LIMITS', presetSel='Standard', values={};
+
+function el(id){ return document.getElementById(id); }
+function defaults(t){ const o={}; TESTS[t].fields.forEach(f=>o[f.n]=f.d); return o; }
+
+function renderChecks(){
+  const ul=el('checks'); const li=[];
+  if(!CFG){
+    li.push('<li class="warn">&#9888; No live printer data — run '
+      +'<kbd>SPEED_TEST_GUI</kbd> on the printer to regenerate this page '
+      +'with your current config baked in.</li>');
+  } else {
+    li.push('<li>'+(CFG.endstop_phase
+      ? '<span class="warn">&#10007; [endstop_phase] is loaded — remove it '
+        +'from printer.cfg and FIRMWARE_RESTART, it aborts the test!</span>'
+      : '<span class="ok">&#10003;</span> [endstop_phase] not loaded (correct)')+'</li>');
+    li.push('<li><span class="ok">&#10003;</span> Testbench mode: <b>'
+      +(CFG.testbench?'ON (single motor on X)':'off (full printer)')+'</b></li>');
+    li.push('<li>'+(CFG.max_current>0
+      ? '<span class="ok">&#10003;</span> Current safety cap: <b>'+CFG.max_current+' A</b>'
+      : '<span class="warn">&#9888;</span> No <kbd>max_current</kbd> cap set — '
+        +'recommended before current tests!')+'</li>');
+    if(CFG.tmc) li.push('<li><span class="ok">&#10003;</span> TMC driver: <b>'
+      +CFG.tmc+'</b>, run_current <b>'+CFG.run_current+' A</b></li>');
+    li.push('<li><span class="ok">&#10003;</span> Reports go to: <kbd>'
+      +CFG.output_dir+'</kbd></li>');
+  }
+  li.push('<li>&#128161; Make sure the axis can move freely over its whole '
+    +'range and nothing is attached that can be damaged.</li>');
+  ul.innerHTML=li.join('');
+}
+
+function renderTests(){
+  el('testgrid').innerHTML=Object.keys(TESTS).map(k=>{
+    const t=TESTS[k];
+    return '<div class="testcard'+(k===sel?' sel':'')+'" data-k="'+k+'">'
+      +'<b>'+t.name+(t.rec?'<span class="badge">RECOMMENDED</span>':'')+'</b>'
+      +'<span>'+t.blurb+'</span></div>';
+  }).join('');
+  document.querySelectorAll('.testcard').forEach(c=>c.onclick=()=>{
+    sel=c.dataset.k; presetSel='Standard'; values=defaults(sel); renderAll();
+  });
+}
+
+function renderPresets(){
+  const t=TESTS[sel]; const keys=Object.keys(t.presets);
+  el('presets').innerHTML=keys.map(p=>
+    '<button type="button" class="'+(p===presetSel?'sel':'')+'" data-p="'+p+'">'
+    +p+'</button>').join('');
+  document.querySelectorAll('#presets button').forEach(b=>b.onclick=()=>{
+    presetSel=b.dataset.p;
+    values=Object.assign(defaults(sel), t.presets[presetSel]||{});
+    renderAll();
+  });
+}
+
+function fieldHtml(f){
+  const v=values[f.n]!==undefined?values[f.n]:f.d;
+  return '<div class="field"><label>'+f.l+'</label>'
+    +'<input data-n="'+f.n+'" value="'+v+'" />'
+    +(f.h?'<span class="hint">'+f.h+'</span>':'')+'</div>';
+}
+
+function renderFields(){
+  const t=TESTS[sel];
+  el('testdesc').textContent=t.desc;
+  el('basicfields').innerHTML=t.fields.filter(f=>!f.adv).map(fieldHtml).join('');
+  const adv=t.fields.filter(f=>f.adv);
+  el('advdetails').style.display=adv.length?'':'none';
+  el('advfields').innerHTML=adv.map(fieldHtml).join('');
+  document.querySelectorAll('.field input').forEach(i=>i.oninput=()=>{
+    values[i.dataset.n]=i.value; renderCmd();
+  });
+}
+
+function renderCmd(){
+  const t=TESTS[sel]; let cmd=t.cmd; const defs=defaults(sel);
+  t.fields.forEach(f=>{
+    const v=(values[f.n]!==undefined?values[f.n]:f.d).toString().trim();
+    if(v!=='' && v!==defs[f.n]) cmd+=' '+f.n+'='+v;
+    else if(v!=='' && f.n==='AXIS' && v!=='X') cmd+=' AXIS='+v;
+  });
+  el('cmdbox').textContent=cmd;
+  return cmd;
+}
+
+function renderAll(){ renderTests(); renderPresets(); renderFields(); renderCmd(); }
+
+el('copybtn').onclick=()=>{
+  navigator.clipboard.writeText(renderCmd()).then(()=>{
+    el('copybtn').textContent='✓ Copied — paste into the console';
+    setTimeout(()=>el('copybtn').innerHTML='&#128203; Copy command',2200);
+  });
+};
+el('sendbtn').onclick=()=>{
+  const url=el('moonurl').value.replace(/\/+$/,'');
+  const msg=el('sendmsg');
+  msg.textContent='Sending…'; msg.style.color='var(--muted)';
+  fetch(url+'/printer/gcode/script?script='+encodeURIComponent(renderCmd()),
+        {method:'POST'})
+    .then(r=>{ if(!r.ok) throw new Error('HTTP '+r.status);
+      msg.textContent='✓ Sent! Watch the console for progress.';
+      msg.style.color='var(--green)'; })
+    .catch(e=>{ msg.textContent='✗ Could not send ('+e.message
+      +'). Use Copy instead, or add this page’s origin to Moonraker '
+      +'cors_domains.'; msg.style.color='var(--red)'; });
+};
+
+el('moonurl').value='http://'+(location.hostname||'mainsail.local')+':7125';
+values=defaults(sel);
+renderChecks(); renderAll();
+</script>
+</body></html>
