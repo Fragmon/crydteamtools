@@ -15,6 +15,7 @@ A collection of Klipper diagnostic and tuning plugins by **Steven (Fragmon) — 
 | ------ | ------------ | ---- |
 | **[Speed Test](speed_test/README.md)** | Finds a motor's real limits: max velocity, max acceleration per speed (limit map), square-corner velocity and the lowest run_current that still holds them — validated with a simulated print. CSV + interactive HTML reports, beginner-friendly control-panel GUI. | [speed_test/](speed_test/README.md) |
 | **[TMC Flow Test](max_flow_test/README.md)** | Finds your printer's real max flow rate in ~30 minutes without test prints: runs the extruder at rising flow rates and watches the TMC StallGuard signal for slip onset. Interactive dashboard with recommended slicer values. | [max_flow_test/](max_flow_test/README.md) |
+| **[Motor Sync](motor_sync/README.md)** | Synchronizes the two motors of a dual-motor axis (AWD, dual gantry) — **without an accelerometer**: out-of-phase motors fight each other, the extra load shows in StallGuard, and the plugin shifts one motor in microsteps until the fight is gone. Sync approach adapted from [MRX8024/motors-sync](https://github.com/MRX8024/motors-sync). | [motor_sync/](motor_sync/README.md) |
 
 More plugins will join this collection — each lives in its own folder with its
 own README and docs.
