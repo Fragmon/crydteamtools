@@ -127,14 +127,27 @@ link() {   # link <src> <dst>
     ln -s "$1" "$2"
 }
 
-# Insert "[include <file>]" at the VERY TOP of printer.cfg (idempotent).
+# True if "[include <file>]" already exists ANYWHERE in the config
+# dir — printer.cfg or any sub-config (users often keep their includes
+# in a separate file). Tolerates extra whitespace, ignores commented
+# lines. A duplicate include would break Klipper at restart, so this
+# check errs on the side of finding existing entries.
+include_present() {   # include_present <cfg-file-name>
+    esc=$(printf '%s' "$1" | sed 's/[][\.*^$]/\\&/g')
+    grep -rEqs --include='*.cfg' \
+        "^[[:space:]]*\[include[[:space:]]+${esc}[[:space:]]*\]" \
+        "${CONFIG_DIR}" 2>/dev/null
+}
+
+# Insert "[include <file>]" at the VERY TOP of printer.cfg — only if
+# it is not already included somewhere.
 add_include_top() {   # add_include_top <cfg-file-name>
     if [ ! -f "${PRINTER_CFG}" ]; then
         echo "  • printer.cfg not found — add [include $1] manually"
         return
     fi
-    if grep -q "^\[include $1\]" "${PRINTER_CFG}"; then
-        echo "  • [include $1] already in printer.cfg"
+    if include_present "$1"; then
+        echo "  • [include $1] already present — skipped"
     else
         tmp="$(mktemp)"
         { echo "[include $1]"; cat "${PRINTER_CFG}"; } > "$tmp"
@@ -183,9 +196,13 @@ done
 # Registers the repo so updates show up in Mainsail/Fluidd's update
 # manager (with the release version from the git tag).
 if [ -f "${MOONRAKER_CONF}" ]; then
-    if grep -q "^\[update_manager ${UPDATER_NAME}\]" "${MOONRAKER_CONF}"; then
+    # Check moonraker.conf AND any included .conf for an existing
+    # entry — only add it if it is missing everywhere.
+    if grep -rEqs --include='*.conf' \
+        "^[[:space:]]*\[update_manager[[:space:]]+${UPDATER_NAME}[[:space:]]*\]" \
+        "${CONFIG_DIR}" 2>/dev/null; then
         echo ""
-        echo "  • update manager entry already present in moonraker.conf"
+        echo "  • update manager entry already present — skipped"
     else
         cat <<EOF >> "${MOONRAKER_CONF}"
 
