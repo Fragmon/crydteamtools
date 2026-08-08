@@ -43,6 +43,14 @@ plugin_macros() {
         max_flow_test) echo "max_flow_test/tmc_flow_test_macros.cfg" ;;
     esac
 }
+# Commented config-section template, COPIED (not linked) into the
+# config dir so the user's edits survive plugin updates.
+plugin_settings() {
+    case "$1" in
+        speed_test)    echo "speed_test/speed_test_settings.cfg" ;;
+        max_flow_test) echo "max_flow_test/tmc_flow_test_settings.cfg" ;;
+    esac
+}
 
 echo ""
 echo "=========================================="
@@ -107,6 +115,22 @@ link() {   # link <src> <dst>
     ln -s "$1" "$2"
 }
 
+# Insert "[include <file>]" at the VERY TOP of printer.cfg (idempotent).
+add_include_top() {   # add_include_top <cfg-file-name>
+    if [ ! -f "${PRINTER_CFG}" ]; then
+        echo "  • printer.cfg not found — add [include $1] manually"
+        return
+    fi
+    if grep -q "^\[include $1\]" "${PRINTER_CFG}"; then
+        echo "  • [include $1] already in printer.cfg"
+    else
+        tmp="$(mktemp)"
+        { echo "[include $1]"; cat "${PRINTER_CFG}"; } > "$tmp"
+        mv "$tmp" "${PRINTER_CFG}"
+        echo "  ✓ [include $1] added to top of printer.cfg"
+    fi
+}
+
 echo ""
 for id in "${SELECTED[@]}"; do
     echo "── $id ──"
@@ -124,18 +148,22 @@ for id in "${SELECTED[@]}"; do
         dst="${CONFIG_DIR}/$(basename "$macro_rel")"
         link "${REPO_DIR}/${macro_rel}" "$dst"
         echo "  ✓ $(basename "$macro_rel") → ${dst}"
-        # Add the [include …] line to printer.cfg (idempotent)
-        macro_name="$(basename "$macro_rel")"
-        if [ -f "${PRINTER_CFG}" ]; then
-            if grep -q "^\[include ${macro_name}\]" "${PRINTER_CFG}"; then
-                echo "  • [include ${macro_name}] already in printer.cfg"
-            else
-                printf '\n[include %s]\n' "${macro_name}" >> "${PRINTER_CFG}"
-                echo "  ✓ [include ${macro_name}] added to printer.cfg"
-            fi
+        add_include_top "$(basename "$macro_rel")"
+    fi
+    # Config-section template: copy once (user edits must survive
+    # updates), then include it at the top of printer.cfg. The
+    # section inside ships fully commented out, so including it
+    # changes nothing until the user uncomments [<plugin section>].
+    settings_rel="$(plugin_settings "$id")"
+    if [ -n "$settings_rel" ] && [ -f "${REPO_DIR}/${settings_rel}" ] && [ -d "${CONFIG_DIR}" ]; then
+        dst="${CONFIG_DIR}/$(basename "$settings_rel")"
+        if [ -f "$dst" ]; then
+            echo "  • $(basename "$settings_rel") already exists — left untouched"
         else
-            echo "  • printer.cfg not found — add [include ${macro_name}] manually"
+            cp "${REPO_DIR}/${settings_rel}" "$dst"
+            echo "  ✓ $(basename "$settings_rel") copied to ${dst}"
         fi
+        add_include_top "$(basename "$settings_rel")"
     fi
 done
 
@@ -175,12 +203,12 @@ echo "Next steps:"
 for id in "${SELECTED[@]}"; do
     case "$id" in
         speed_test)
-            echo "  speed_test:    add a [speed_test] section to printer.cfg" ;;
+            echo "  speed_test:    uncomment [speed_test] in speed_test_settings.cfg" ;;
         max_flow_test)
-            echo "  max_flow_test: add a [tmc_flow_test] section to printer.cfg" ;;
+            echo "  max_flow_test: uncomment [tmc_flow_test] in tmc_flow_test_settings.cfg" ;;
     esac
 done
-echo "  (macro includes and Moonraker update entry were added automatically)"
+echo "  (includes, settings templates and Moonraker update entry were added automatically)"
 echo "  then: FIRMWARE_RESTART"
 echo ""
 echo "Docs: see the README.md inside each plugin folder."

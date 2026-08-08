@@ -34,7 +34,10 @@ cd crydteamtools
 (or manually: `ln -sf ~/crydteamtools/speed_test/speed_test.py
 ~/klipper/klippy/extras/speed_test.py`)
 
-Add the config below, then `FIRMWARE_RESTART`.
+The installer also drops a fully commented `speed_test_settings.cfg` into
+your config directory and includes it at the top of `printer.cfg`. To
+enable the plugin, open that file, uncomment the `[speed_test]` line, then
+`FIRMWARE_RESTART`. Every option is documented in the file.
 
 ## Minimal config
 

@@ -44,13 +44,16 @@ cd crydteamtools
 
 The installer symlinks `tmc_flow_test.py` into Klipper's extras folder and the
 optional UI macros into your config directory (run it without arguments to
-pick plugins interactively).
+pick plugins interactively). It also drops a fully commented
+`tmc_flow_test_settings.cfg` into your config directory and includes it at
+the top of `printer.cfg` — to enable the plugin, uncomment the
+`[tmc_flow_test]` line in that file, then `FIRMWARE_RESTART`.
 
 **Updates**: `cd ~/crydteamtools && git pull`, then restart Klipper.
 
 ## Configure
 
-Add this to your `printer.cfg`:
+In `tmc_flow_test_settings.cfg` (or directly in `printer.cfg`):
 
 ```ini
 [tmc_flow_test]
