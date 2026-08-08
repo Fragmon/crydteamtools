@@ -276,9 +276,10 @@ class MotorSync:
                     hint = "Chopper-mode problem:\n  " \
                         + "\n  ".join(problems)
                 else:
-                    hint = ("Chopper modes look correct — most likely "
-                            "the move is too slow for StallGuard: SG "
-                            "needs roughly >= 1.5 motor revolutions/s "
+                    hint = ("Chopper mode and tcoolthrs were switched "
+                            "automatically — most likely the move is "
+                            "too slow for StallGuard: SG needs "
+                            "roughly >= 1.5 motor revolutions/s "
                             "(rotation_distance 40 => >= ~60 mm/s). "
                             "Retry with BUZZ_SPEED=%.0f or higher."
                             % max(120.0, ctx['buzz_speed'] * 2))
@@ -328,12 +329,19 @@ class MotorSync:
         for h in handles:
             if h.is_2209:
                 # SG4 measures only in StealthChop; tpwmthrs=0 keeps
-                # StealthChop active at every speed.
-                wanted = (('en_spreadCycle', 0), ('tpwmthrs', 0))
+                # StealthChop active at every speed. semin=0 disables
+                # CoolStep so current modulation can't distort SG.
+                wanted = (('en_spreadCycle', 0), ('tpwmthrs', 0),
+                          ('semin', 0))
             elif h.sg2:
                 # TMC5160 / TMC2130 / TMC2240 / TMC2660: SG2 measures
-                # only in SpreadCycle; en_pwm_mode=0 forces it.
-                wanted = (('en_pwm_mode', 0),)
+                # only in SpreadCycle (en_pwm_mode=0). tcoolthrs=0
+                # keeps SG_RESULT disabled on these chips — raise it
+                # to max so SG is active at every test speed (2660 has
+                # no tcoolthrs register; the write is skipped there).
+                # semin=0 disables CoolStep during the test.
+                wanted = (('en_pwm_mode', 0), ('tcoolthrs', 0xFFFFF),
+                          ('semin', 0))
             else:
                 continue
             for field, target in wanted:
