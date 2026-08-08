@@ -38,10 +38,15 @@ def _sanitize_csv(name):
     return ''.join(out) or 'sensor'
 
 
-SAMPLE_INTERVAL = 0.05    # 20 Hz polling
+SAMPLE_INTERVAL = 0.02    # 50 Hz polling — stall clicks last ~10-30 ms,
+                          # at 20 Hz most of them fell between samples
+THERMAL_EVERY_N = 12      # thermal snapshot every Nth SG sample (~4 Hz)
+STARTUP_TRIM_FRACTION = 0.10  # drop first 10 % of each run's SG samples
+                              # (spin-up transient reads near 0 on SG2
+                              # and poisons sg_min / dip detection)
 MIN_HOTEND_TEMP = 180.0
 MODULE_NAME = "TMC Flow Test"
-MODULE_VERSION = "1.0.0"
+MODULE_VERSION = "1.1.0"
 SG_MIN_INFORMATIVE = 50   # below this SG value, readings are noise
 
 
@@ -137,6 +142,17 @@ class TriggerProfile:
     # Inverse direction (rare case where SG rises with load)
     SG_MIN_RATIO_TO_MEDIAN = 3.0
     SG_MIN_ABS_GAP = 80
+
+    # ─── _check_dip_collapse thresholds (SG2 only) ─────────────────
+    # A stick-slip stall drives SG_RESULT toward 0 for a few samples —
+    # far too few to move median/IQR/CV. After the spin-up trim,
+    # samples below DIP_FRACTION × run-median count as collapse dips.
+    # The trigger fires when the step's dip RATE clears both an
+    # absolute floor and a multiple of the prior-step baseline.
+    DIP_FRACTION = 0.25             # dip = sample < this × run median
+    DIP_MIN_COUNT = 3               # min dips in the step to consider
+    DIP_RATE_MIN = 0.01             # ≥ 1 % of the step's samples
+    DIP_BASE_RATIO = 3.0            # and ≥ 3× prior-step baseline rate
 
     # ─── _check_run_outlier thresholds ─────────────────────────────
     OUTLIER_MAD_RATIO = 4.0         # deviation ≥ this × MAD
@@ -268,6 +284,17 @@ class TMC2240Profile(TriggerProfile):
     WARMUP_DRIFT_THRESHOLD = 0.04   # 4 % — catches the systematic drift
     PLATEAU_RATIO = 0.2             # steeper saturation than TMC5160
 
+    # Third fix (validated against CSV 2026-08-08_10-03-53): audible
+    # stalls at flow=70 produced a real CV jump (3.4 % = 3.3× the
+    # 1.0 % baseline) that stayed under the TMC5160 floor of 5.0.
+    # TMC2240 SG2 runs are tighter (clean CV ~0.7-1.3 %), so a lower
+    # absolute floor is safe for the coarse phase — but paired with a
+    # stricter ratio: replaying CSV 2026-05-02_19-37-17 showed a 2.9×
+    # jump to CV 3.0 % at flow=80 on a run whose trend only flattened
+    # at 95, and firing there would truncate the result.
+    CV_JUMP_MIN_COARSE = 3.0
+    CV_JUMP_RATIO_COARSE = 3.0
+
 
 class TMC2209Profile(TriggerProfile):
     """TMC2209 — SG4 in StealthChop or SpreadCycle.
@@ -340,6 +367,12 @@ class TMC2209Profile(TriggerProfile):
     BORDER_CV_HIGH = 12.0
     BORDER_IQR_LOW = 30
     BORDER_IQR_HIGH = 50
+
+    # ─── Dip-collapse trigger DISABLED ────────────────────────────
+    # SG4 sticks in a low "bias region" at low velocity and its
+    # magnitude doesn't follow the SG2 collapse model — low samples
+    # are normal, not stalls.
+    DIP_MIN_COUNT = 999999
 
     # ─── Outlier detection (single-run slip in 5 reps) ────────────
     OUTLIER_MAD_RATIO = 4.0
@@ -732,7 +765,7 @@ class TMCFlowTest:
         self.samples_thermal = []
         self.sample_start_time = self.reactor.monotonic()
         self.sampling_active = True
-        # Cadence for thermal sampling — SG sampling is 20 Hz which is
+        # Cadence for thermal sampling — SG sampling is 50 Hz which is
         # overkill for thermal. Sample thermal every Nth SG sample.
         self._thermal_sample_counter = 0
         self.sample_timer = self.reactor.register_timer(
@@ -757,10 +790,10 @@ class TMCFlowTest:
             if direct_read or sg > 0:
                 self.samples_sg.append(sg)
                 self.samples_time.append(rel_t)
-        # Thermal sampling at lower cadence (every 5th SG sample = ~4 Hz)
-        # — temp + PWM don't change fast enough to need 20 Hz.
+        # Thermal sampling at lower cadence (~4 Hz) — temp + PWM don't
+        # change fast enough to need the full SG sample rate.
         self._thermal_sample_counter += 1
-        if self._thermal_sample_counter >= 5:
+        if self._thermal_sample_counter >= THERMAL_EVERY_N:
             self._thermal_sample_counter = 0
             self.samples_thermal.append(self._get_thermal_snapshot())
         return eventtime + SAMPLE_INTERVAL
@@ -827,6 +860,7 @@ class TMCFlowTest:
             # CSV header
             base_header = ("phase,flow_mm3s,sg_median,sg_p25,sg_p75,sg_avg,"
                            "sg_min,sg_max,sg_n,n_repeats,sg_run_cv_pct,"
+                           "sg_dips,sg_dip_rate_pct,"
                            "run_sg_avgs,"
                            "temp_target,temp_start,temp_end,temp_min,"
                            "temp_avg,temp_drop,"
@@ -869,8 +903,9 @@ class TMCFlowTest:
                         return ''
                     return "%d" % v
 
+                dip = r.get('dip') or {}
                 base_row = ("%s,%.2f,%s,%s,%s,%s,%s,%s,%s,"
-                            "%d,%s,%s,"
+                            "%d,%s,%s,%s,%s,"
                             "%s,%s,%s,%s,%s,%s,"
                             "%s,%s,%s,"
                             "%s,%s") % (
@@ -881,6 +916,8 @@ class TMCFlowTest:
                     sg.get('n', 0),
                     len(run_sg),
                     "%.1f" % rc.get('sg_cv', 0) if rc else '',
+                    str(dip.get('count', '')),
+                    "%.2f" % (dip['rate'] * 100) if dip else '',
                     '|'.join("%.1f" % v for v in run_sg),
                     fmt_t(th, 'temp_target'),
                     fmt_t(th, 'temp_start'),
@@ -3172,7 +3209,7 @@ new Chart(document.getElementById('cvChart'), {
         """Compute time-trend metrics from one run's SG samples.
 
         Within a single 5-second run, samples are recorded in time
-        order (~20 Hz). If SG drifts during the run it tells us
+        order (~50 Hz). If SG drifts during the run it tells us
         something the per-run-median can't: a steady slope is the
         signature of cold extrusion (load grows as filament cools
         further), while a sudden jump near the end is motor slip
@@ -3294,7 +3331,14 @@ new Chart(document.getElementById('cvChart'), {
             # represent actual heater stress under load.
             active_thermal_samples.extend(self.samples_thermal)
 
-            run_sg = list(self.samples_sg)
+            run_sg_raw = list(self.samples_sg)
+            # Trim the spin-up transient: while the motor accelerates
+            # from standstill SG2 reads near 0, which poisons sg_min
+            # and would drown real stall dips. (The intra-run trend
+            # code below does its own identical skip on the raw list.)
+            skip = (max(2, int(len(run_sg_raw) * STARTUP_TRIM_FRACTION))
+                    if len(run_sg_raw) >= 20 else 0)
+            run_sg = run_sg_raw[skip:]
             per_run_sg.append(run_sg)
             if run_sg:
                 run_sg_avgs.append(sum(run_sg) / len(run_sg))
@@ -3304,7 +3348,7 @@ new Chart(document.getElementById('cvChart'), {
             # extrusion as opposed to abrupt motor slip).
             per_run_trends.append(
                 self._compute_intra_run_trend(
-                    run_sg, sg2_driver=self.sg2_driver))
+                    run_sg_raw, sg2_driver=self.sg2_driver))
 
             if rep < repeat - 1:
                 self.gcode.run_script_from_command("G4 P300")
@@ -3333,6 +3377,25 @@ new Chart(document.getElementById('cvChart'), {
 
         sg_stats = self._stats(agg_sg)
 
+        # Collapse-dip counting (SG2 only): samples far below the run
+        # median are brief stall events. Thanks to the spin-up trim
+        # above, a clean run has essentially none of these.
+        dip_agg = None
+        if self.sg2_driver:
+            dip_count = 0
+            dip_n = 0
+            for idx in included_indices:
+                samples = per_run_sg[idx]
+                if len(samples) < 10:
+                    continue
+                run_median = sorted(samples)[len(samples) // 2]
+                threshold = run_median * self.profile.DIP_FRACTION
+                dip_count += sum(1 for s in samples if s < threshold)
+                dip_n += len(samples)
+            if dip_n > 0:
+                dip_agg = {'count': dip_count, 'n': dip_n,
+                           'rate': dip_count / dip_n}
+
         included_sg_avgs = [run_sg_avgs[i] for i in included_indices
                             if i < len(run_sg_avgs)]
         run_consistency = None
@@ -3352,10 +3415,12 @@ new Chart(document.getElementById('cvChart'), {
         cv_str = ("%.1f%%" % run_consistency['sg_cv']
                   if run_consistency else 'n/a')
         warmup_str = ' [run 1 excluded as warmup]' if warmup_dropped else ''
+        dip_str = (' | dips = %d' % dip_agg['count']
+                   if dip_agg and dip_agg['count'] > 0 else '')
         gcmd.respond_info(
             "  %.1f mm³/s | SG median = %s | "
-            "run-to-run CV = %s%s"
-            % (target_flow, sg_med_str, cv_str, warmup_str))
+            "run-to-run CV = %s%s%s"
+            % (target_flow, sg_med_str, cv_str, dip_str, warmup_str))
 
         # Aggregate thermal samples — only the ACTIVE extrusion ones
         # define pwm_avg/max/min and the temp_drop. Recovery samples
@@ -3386,6 +3451,7 @@ new Chart(document.getElementById('cvChart'), {
             'run_consistency': run_consistency,
             'run_sg_avgs': run_sg_avgs,
             'warmup_dropped': warmup_dropped,
+            'dip': dip_agg,
             'thermal': thermal_agg,
             'intra_run': self._aggregate_intra_run_trends(per_run_trends),
         }
@@ -3430,7 +3496,12 @@ new Chart(document.getElementById('cvChart'), {
           2. Plateau over 2 steps: the trend stalls — cumulative
              trend-direction movement is less than half the typical
         """
-        if not results or len(results) < 5:
+        # Direction-independent triggers (dip / CV / IQR) get a usable
+        # baseline after 2 prior steps; the trend triggers below guard
+        # themselves with len(sg_deltas) >= 3 (needs 5 results). The
+        # old flat len<5 gate left the first 4 coarse steps entirely
+        # trigger-blind — a stall on step 4 went unnoticed.
+        if not results or len(results) < 3:
             return None
         r = results[-1]
         sg_stats = r['sg']
@@ -3615,6 +3686,13 @@ new Chart(document.getElementById('cvChart'), {
         # itself, not on a trend baseline, so they make sense for both
         # coarse and bisection probes.
 
+        # Trigger 0: collapse dips (SG2 only). Brief stick-slip stalls
+        # drive SG toward 0 for a few samples — the distribution stats
+        # below absorb them completely, so check the dip counter first.
+        dip_reason = self._check_dip_collapse(results, sg_label)
+        if dip_reason:
+            return dip_reason
+
         # Trigger 3: run-to-run CV spike. Intermittent slip shows up as
         # a sudden burst of variance between repeats at the same flow,
         # even when the median doesn't move much. Fire when the latest
@@ -3623,6 +3701,15 @@ new Chart(document.getElementById('cvChart'), {
         cv_reason = self._check_cv_spike(results, sg_label)
         if cv_reason:
             return cv_reason
+
+        # The remaining distribution triggers keep the original 5-step
+        # maturity requirement: early coarse steps often sit in the SG
+        # saturation region with spiky max/IQR, and replaying the
+        # validated CSVs showed false fires (e.g. 5160 gap-jump at
+        # flow=40 on a run whose real limit was ~114) when these run
+        # on a 2-step baseline.
+        if len(results) < 5:
+            return None
 
         # Trigger 4: IQR/spread anomaly. Catches "quiet" stalls where
         # the median looks normal but the distribution widens (brief
@@ -3645,6 +3732,39 @@ new Chart(document.getElementById('cvChart'), {
         if outlier_reason:
             return outlier_reason
 
+        return None
+
+    def _check_dip_collapse(self, results, sg_label):
+        """Detect brief SG collapse dips — the stick-slip stall signature.
+
+        On SG2 drivers a lost-step event snaps SG_RESULT toward 0 for
+        ~1-2 samples per click. Median, IQR and CV barely move (a few
+        dips among hundreds of samples), so those triggers stay quiet
+        even while the motor audibly rattles. Count samples below
+        DIP_FRACTION × run-median (spin-up transient already trimmed
+        in _measure_step) and fire when the step's dip rate clears the
+        absolute floor AND a multiple of the prior-step baseline.
+        """
+        if not self.sg2_driver:
+            return None
+        p = self.profile
+        dip = results[-1].get('dip')
+        if not dip or dip['n'] == 0:
+            return None
+        rate = dip['rate']
+        if dip['count'] < p.DIP_MIN_COUNT or rate < p.DIP_RATE_MIN:
+            return None
+        prior_rates = sorted(
+            r['dip']['rate'] for r in results[:-1]
+            if r.get('dip') and r['dip']['n'] > 0)
+        baseline = (prior_rates[len(prior_rates) // 2]
+                    if prior_rates else 0.0)
+        if rate >= max(p.DIP_RATE_MIN, baseline * p.DIP_BASE_RATIO):
+            return ("%s collapse dips: %d of %d samples below %.0f%% of "
+                    "the run median (%.1f%% of samples vs baseline "
+                    "%.1f%%) — brief stall events (stick-slip)"
+                    % (sg_label, dip['count'], dip['n'],
+                       p.DIP_FRACTION * 100, rate * 100, baseline * 100))
         return None
 
     def _check_cv_spike(self, results, sg_label):
