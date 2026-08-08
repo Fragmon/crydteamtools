@@ -57,6 +57,52 @@ class _TmcHandle:
                           self.stepper_name, e)
             return None
 
+    def field(self, name):
+        try:
+            return self.tmc.fields.get_field(name)
+        except Exception:
+            return None
+
+    def chopper_mode(self):
+        """'SpreadCycle' / 'StealthChop' / '?' from the config fields."""
+        en_pwm = self.field('en_pwm_mode')       # 5160 / 2130 / 2240
+        if en_pwm is not None:
+            return 'StealthChop' if en_pwm else 'SpreadCycle'
+        en_spread = self.field('en_spreadCycle')  # 2209 / 2208
+        if en_spread is not None:
+            return 'SpreadCycle' if en_spread else 'StealthChop'
+        return '?'
+
+    def diag_line(self):
+        vals = []
+        vals.append("chopper=%s" % self.chopper_mode())
+        for name in ('tpwmthrs', 'tcoolthrs', 'thigh', 'sgt', 'sgthrs'):
+            v = self.field(name)
+            if v is not None:
+                vals.append("%s=%s" % (name, v))
+        return "%s (%s): %s" % (self.stepper_name, self.driver_type,
+                                " ".join(vals))
+
+    def sg_mode_problem(self):
+        """Config problem that makes SG read 0, or None if it looks ok.
+
+        SG2 (5160/2130/2240/2660) only measures in SpreadCycle —
+        in StealthChop SG_RESULT reads 0. SG4 (2209) is the exact
+        opposite: it only measures in StealthChop.
+        """
+        mode = self.chopper_mode()
+        if self.is_2209 and mode == 'SpreadCycle':
+            return ("%s: TMC2209 StallGuard4 needs StealthChop — add "
+                    "'stealthchop_threshold: 999999' to [%s %s]"
+                    % (self.stepper_name, self.driver_type,
+                       self.stepper_name))
+        if self.sg2 and mode == 'StealthChop':
+            return ("%s: %s StallGuard2 needs SpreadCycle — remove "
+                    "'stealthchop_threshold' from [%s %s]"
+                    % (self.stepper_name, self.driver_type.upper(),
+                       self.driver_type, self.stepper_name))
+        return None
+
 
 class MotorSync:
     def __init__(self, config):
@@ -65,10 +111,11 @@ class MotorSync:
         self.reactor = self.printer.get_reactor()
 
         self.default_axis = config.get('default_axis', 'X').upper()
-        # Slow constant-speed measurement move. Must be fast enough
-        # that TSTEP stays below the driver's coolstep_threshold so
-        # StallGuard is active.
-        self.buzz_speed = config.getfloat('buzz_speed', 30.0, above=0.)
+        # Constant-speed measurement move. StallGuard2 needs roughly
+        # >= 1.5 motor revolutions/s to produce valid readings — with
+        # a typical rotation_distance of 40 mm that means >= ~60 mm/s,
+        # so the default is deliberately not "slow".
+        self.buzz_speed = config.getfloat('buzz_speed', 100.0, above=0.)
         self.buzz_distance = config.getfloat('buzz_distance', 40.0,
                                              above=5.)
         self.repeats = config.getint('repeats', 2, minval=1)
@@ -222,12 +269,24 @@ class MotorSync:
                     "motor_sync: no SG samples received — check the "
                     "TMC wiring/UART/SPI of both drivers.")
             if a <= 0 and b <= 0:
+                problems = [p for p in
+                            (h.sg_mode_problem() for h in ctx['handles'])
+                            if p]
+                if problems:
+                    hint = "Chopper-mode problem:\n  " \
+                        + "\n  ".join(problems)
+                else:
+                    hint = ("Chopper modes look correct — most likely "
+                            "the move is too slow for StallGuard: SG "
+                            "needs roughly >= 1.5 motor revolutions/s "
+                            "(rotation_distance 40 => >= ~60 mm/s). "
+                            "Retry with BUZZ_SPEED=%.0f or higher."
+                            % max(120.0, ctx['buzz_speed'] * 2))
                 raise self.gcode.error(
-                    "motor_sync: StallGuard reads 0 during the move. "
-                    "SG is velocity-gated — make sure both driver "
-                    "sections have 'coolstep_threshold' set below "
-                    "%.0f mm/s (SG2 drivers also need SpreadCycle: "
-                    "no stealthchop_threshold)." % ctx['buzz_speed'])
+                    "motor_sync: StallGuard reads 0 during the move.\n"
+                    "  %s\n  %s\n%s"
+                    % (ctx['handles'][0].diag_line(),
+                       ctx['handles'][1].diag_line(), hint))
             gcmd.respond_info(
                 "    pass %d/%d %s: %s=%.0f  %s=%.0f  (n=%d+%d)"
                 % (rep + 1, ctx['repeats'],
@@ -313,6 +372,25 @@ class MotorSync:
                buzz_speed, seg * 2.0, repeats,
                coarse, max_offset, max_off_fs, min_gain))
 
+        # Early warnings: wrong chopper mode / too little rotation
+        # speed both end in "SG reads 0" — say so before moving.
+        for h in (handle_a, handle_b):
+            problem = h.sg_mode_problem()
+            if problem:
+                gcmd.respond_info("  WARNING: %s" % problem)
+        try:
+            rot_dist = primary.get_rotation_distance()[0]
+            rps = buzz_speed / rot_dist
+            if rps < 1.5:
+                gcmd.respond_info(
+                    "  WARNING: %.0f mm/s is only %.1f motor rev/s "
+                    "(rotation_distance %.0f). StallGuard needs "
+                    "roughly >= 1.5 rev/s — consider BUZZ_SPEED=%.0f."
+                    % (buzz_speed, rps, rot_dist,
+                       math.ceil(rot_dist * 1.5 / 10) * 10))
+        except Exception:
+            pass
+
         applied = 0
         try:
             gcmd.respond_info("  measuring baseline (%d passes)..."
@@ -390,14 +468,20 @@ class MotorSync:
                 continue
             axis = base[0][-1].upper()
             drvs = []
+            diag = []
             for name in names:
                 try:
                     h = self._find_tmc(name)
                     drvs.append("%s (%s)" % (name, h.driver_type))
+                    diag.append("    " + h.diag_line())
+                    problem = h.sg_mode_problem()
+                    if problem:
+                        diag.append("    WARNING: %s" % problem)
                 except Exception:
                     drvs.append("%s (no SG driver!)" % name)
             found = True
             lines.append("  axis %s: %s" % (axis, " + ".join(drvs)))
+            lines.extend(diag)
         if not found:
             lines.append("  no dual-motor axis found — motor_sync "
                          "needs e.g. [stepper_x] + [stepper_x1]")

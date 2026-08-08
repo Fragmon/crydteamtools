@@ -41,10 +41,13 @@ minimal fight, i.e. sync.
 - Both motors on TMC drivers **with StallGuard readback**:
   TMC2130 / TMC2209 / TMC2240 / TMC5160 / TMC2660.
   **TMC2208/2225 have no StallGuard and cannot work.**
-- In both driver sections: `coolstep_threshold` set below `buzz_speed`
-  (default 30 mm/s), so StallGuard is active during the measurement.
-  SG2 drivers (2130/2240/5160/2660) additionally need **SpreadCycle**
-  (no `stealthchop_threshold`); the TMC2209 needs **StealthChop**.
+- SG2 drivers (2130/2240/5160/2660) need **SpreadCycle**
+  (no `stealthchop_threshold`, or `stealthchop_threshold: 0`); the
+  TMC2209 needs **StealthChop** (`stealthchop_threshold: 999999`).
+- Enough rotation speed: StallGuard reads 0 below roughly
+  **1.5 motor revolutions/s**. With a typical `rotation_distance` of
+  40 mm the default `buzz_speed` of 100 mm/s is fine; raise it if
+  `MOTOR_SYNC_STATUS` or the error message says the move is too slow.
 
 ## Install
 
@@ -62,7 +65,7 @@ the `[motor_sync]` line in that file, then `FIRMWARE_RESTART`.
 ## Usage
 
 ```
-MOTOR_SYNC [AXIS=X] [BUZZ_SPEED=30] [BUZZ_DIST=40] [REPEATS=2]
+MOTOR_SYNC [AXIS=X] [BUZZ_SPEED=100] [BUZZ_DIST=40] [REPEATS=2]
            [COARSE=4] [MAX_OFFSET=2.0] [MIN_GAIN=4]
 MOTOR_SYNC_STATUS
 ```
