@@ -1794,9 +1794,11 @@ canvas{ max-height:380px; }
   <h2>&#128221; Notes <span style="font-weight:400;color:#9a8a55;font-size:13px">(saved in this browser)</span></h2>
   <div class="fields">
     <div class="field">
-      <label for="thw">Toolhead weight</label>
+      <label for="thw">Toolhead / printbed weight</label>
       <input id="thw" type="text" placeholder="e.g. 450 g" />
-      <span class="hint">Heavier toolhead &rarr; lower safe acceleration.</span>
+      <span class="hint">The mass this axis moves &mdash; toolhead, or the
+        bed on bed-slinger axes. Heavier &rarr; lower safe
+        acceleration.</span>
     </div>
     <div class="field">
       <label for="stp">Stepper / motor</label>
