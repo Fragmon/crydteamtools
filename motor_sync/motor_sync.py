@@ -241,16 +241,19 @@ class MotorSync:
 
     # ─── Measurement ────────────────────────────────────────────────
 
-    def _measure_score(self, gcmd, ctx):
+    def _measure_score(self, gcmd, ctx, probe=False):
         """SG score of one measurement: sum of both drivers' trimmed
         medians, averaged over `repeats` passes. HIGHER = less fight
-        between the motors."""
+        between the motors. With probe=True a single pass is measured
+        and zero readings are returned instead of raising (used by
+        the SGT auto-tune)."""
         toolhead = self._get_toolhead()
         axis = ctx['axis']
         start, end = ctx['seg_start'], ctx['seg_end']
         med_a = []
         med_b = []
-        for rep in range(ctx['repeats']):
+        n_reps = 1 if probe else ctx['repeats']
+        for rep in range(n_reps):
             self.gcode.run_script_from_command(
                 "G90\nG1 %s%.3f F%.0f" % (axis, start,
                                           self.travel_speed * 60.0))
@@ -268,6 +271,10 @@ class MotorSync:
                 raise self.gcode.error(
                     "motor_sync: no SG samples received — check the "
                     "TMC wiring/UART/SPI of both drivers.")
+            if probe:
+                med_a.append(a)
+                med_b.append(b)
+                continue
             if a <= 0 and b <= 0:
                 problems = [p for p in
                             (h.sg_mode_problem() for h in ctx['handles'])
@@ -360,6 +367,46 @@ class MotorSync:
         for h, field, old in reversed(restore):
             self._set_tmc_field(h, field, old)
 
+    # SGT auto-tune targets: SG_RESULT should sit well inside 0..1023
+    # at the test speed so the fight load has room to move it.
+    SGT_TARGET_MIN = 150
+    SGT_STEP = 10
+    SGT_MAX = 63
+
+    def _autotune_sgt(self, gcmd, ctx, restore):
+        """SG2 only: raise each driver's SGT until SG_RESULT reads a
+        usable level at the test speed. With Klipper's default sgt=0
+        many motors read 0 at moderate speeds — SGT is a per-setup
+        sensitivity offset and simply needs tuning (the flow test
+        does the same). Changes are appended to `restore`."""
+        handles = ctx['handles']
+        if not all(h.sg2 for h in handles):
+            return
+        for attempt in range(8):
+            _, a, b = self._measure_score(gcmd, ctx, probe=True)
+            gcmd.respond_info(
+                "  SGT probe %d: %s=%.0f (sgt=%s)  %s=%.0f (sgt=%s)"
+                % (attempt + 1,
+                   handles[0].stepper_name, a, handles[0].field('sgt'),
+                   handles[1].stepper_name, b, handles[1].field('sgt')))
+            changed = False
+            for h, med in zip(handles, (a, b)):
+                cur = h.field('sgt')
+                if cur is None:
+                    continue
+                if med < self.SGT_TARGET_MIN and cur < self.SGT_MAX:
+                    new = min(self.SGT_MAX, cur + self.SGT_STEP)
+                    if self._set_tmc_field(h, 'sgt', new):
+                        if not any(r[0] is h and r[1] == 'sgt'
+                                   for r in restore):
+                            restore.append((h, 'sgt', cur))
+                        gcmd.respond_info(
+                            "    %s: raising sgt %s → %s"
+                            % (h.stepper_name, cur, new))
+                        changed = True
+            if not changed:
+                return
+
     # ─── Single-motor correction moves ──────────────────────────────
 
     def _shift_secondary(self, ctx, msteps):
@@ -449,6 +496,7 @@ class MotorSync:
 
         applied = 0
         try:
+            self._autotune_sgt(gcmd, ctx, sg_mode_restore)
             gcmd.respond_info("  measuring baseline (%d passes)..."
                               % repeats)
             best, med_a, med_b = self._measure_score(gcmd, ctx)
