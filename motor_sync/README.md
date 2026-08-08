@@ -41,9 +41,11 @@ minimal fight, i.e. sync.
 - Both motors on TMC drivers **with StallGuard readback**:
   TMC2130 / TMC2209 / TMC2240 / TMC5160 / TMC2660.
   **TMC2208/2225 have no StallGuard and cannot work.**
-- SG2 drivers (2130/2240/5160/2660) need **SpreadCycle**
-  (no `stealthchop_threshold`, or `stealthchop_threshold: 0`); the
-  TMC2209 needs **StealthChop** (`stealthchop_threshold: 999999`).
+- Chopper mode is handled **automatically**: StallGuard2
+  (2130/2240/5160/2660) measures only in SpreadCycle, StallGuard4
+  (2209) only in StealthChop — the plugin switches both drivers into
+  the right mode for the test and **restores your configured mode
+  afterwards**. No config changes needed.
 - Enough rotation speed: StallGuard reads 0 below roughly
   **1.5 motor revolutions/s**. With a typical `rotation_distance` of
   40 mm the default `buzz_speed` of 100 mm/s is fine; raise it if

@@ -303,6 +303,55 @@ class MotorSync:
         score = (sum(med_a) + sum(med_b)) / n
         return score, sum(med_a) / n, sum(med_b) / n
 
+    # ─── Temporary chopper-mode switching ───────────────────────────
+
+    def _set_tmc_field(self, handle, field, value):
+        tmc = handle.tmc
+        try:
+            reg = tmc.fields.lookup_register(field, None)
+            if reg is None:
+                return False
+            val = tmc.fields.set_field(field, value)
+            print_time = self._get_toolhead().get_last_move_time()
+            tmc.mcu_tmc.set_register(reg, val, print_time)
+            return True
+        except Exception as e:
+            logging.warning("motor_sync: setting %s=%s on %s failed: %s",
+                            field, value, handle.stepper_name, e)
+            return False
+
+    def _enter_sg_mode(self, gcmd, handles):
+        """Temporarily switch both drivers into the chopper mode their
+        StallGuard needs (SG2 -> SpreadCycle, TMC2209/SG4 ->
+        StealthChop). Returns a restore list for _restore_sg_mode."""
+        restore = []
+        for h in handles:
+            if h.is_2209:
+                # SG4 measures only in StealthChop; tpwmthrs=0 keeps
+                # StealthChop active at every speed.
+                wanted = (('en_spreadCycle', 0), ('tpwmthrs', 0))
+            elif h.sg2:
+                # TMC5160 / TMC2130 / TMC2240 / TMC2660: SG2 measures
+                # only in SpreadCycle; en_pwm_mode=0 forces it.
+                wanted = (('en_pwm_mode', 0),)
+            else:
+                continue
+            for field, target in wanted:
+                cur = h.field(field)
+                if cur is None or cur == target:
+                    continue
+                if self._set_tmc_field(h, field, target):
+                    restore.append((h, field, cur))
+                    gcmd.respond_info(
+                        "  %s: %s %s → %s for the test (restored "
+                        "afterwards)" % (h.stepper_name, field, cur,
+                                         target))
+        return restore
+
+    def _restore_sg_mode(self, restore):
+        for h, field, old in reversed(restore):
+            self._set_tmc_field(h, field, old)
+
     # ─── Single-motor correction moves ──────────────────────────────
 
     def _shift_secondary(self, ctx, msteps):
@@ -372,12 +421,11 @@ class MotorSync:
                buzz_speed, seg * 2.0, repeats,
                coarse, max_offset, max_off_fs, min_gain))
 
-        # Early warnings: wrong chopper mode / too little rotation
-        # speed both end in "SG reads 0" — say so before moving.
-        for h in (handle_a, handle_b):
-            problem = h.sg_mode_problem()
-            if problem:
-                gcmd.respond_info("  WARNING: %s" % problem)
+        # Wrong chopper mode is fixed automatically for the duration
+        # of the test (and restored afterwards); too little rotation
+        # speed still needs a user decision — warn about it.
+        sg_mode_restore = self._enter_sg_mode(
+            gcmd, (handle_a, handle_b))
         try:
             rot_dist = primary.get_rotation_distance()[0]
             rps = buzz_speed / rot_dist
@@ -454,6 +502,8 @@ class MotorSync:
                     logging.exception(
                         "motor_sync: revert after error failed")
             raise
+        finally:
+            self._restore_sg_mode(sg_mode_restore)
 
     def cmd_MOTOR_SYNC_STATUS(self, gcmd):
         lines = ["%s v%s" % (MODULE_NAME, MODULE_VERSION)]
