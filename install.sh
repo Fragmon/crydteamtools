@@ -13,6 +13,7 @@ set -e
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 KLIPPER_EXTRAS="${HOME}/klipper/klippy/extras"
 CONFIG_DIR="${HOME}/printer_data/config"
+PRINTER_CFG="${CONFIG_DIR}/printer.cfg"
 MOONRAKER_CONF="${CONFIG_DIR}/moonraker.conf"
 UPDATER_NAME="crydteamtools"
 GIT_ORIGIN="https://github.com/Fragmon/crydteamtools.git"
@@ -123,6 +124,18 @@ for id in "${SELECTED[@]}"; do
         dst="${CONFIG_DIR}/$(basename "$macro_rel")"
         link "${REPO_DIR}/${macro_rel}" "$dst"
         echo "  ✓ $(basename "$macro_rel") → ${dst}"
+        # Add the [include …] line to printer.cfg (idempotent)
+        macro_name="$(basename "$macro_rel")"
+        if [ -f "${PRINTER_CFG}" ]; then
+            if grep -q "^\[include ${macro_name}\]" "${PRINTER_CFG}"; then
+                echo "  • [include ${macro_name}] already in printer.cfg"
+            else
+                printf '\n[include %s]\n' "${macro_name}" >> "${PRINTER_CFG}"
+                echo "  ✓ [include ${macro_name}] added to printer.cfg"
+            fi
+        else
+            echo "  • printer.cfg not found — add [include ${macro_name}] manually"
+        fi
     fi
 done
 
@@ -162,13 +175,12 @@ echo "Next steps:"
 for id in "${SELECTED[@]}"; do
     case "$id" in
         speed_test)
-            echo "  speed_test:    add a [speed_test] section to printer.cfg"
-            echo "                 optional macros: [include speed_test_macros.cfg]" ;;
+            echo "  speed_test:    add a [speed_test] section to printer.cfg" ;;
         max_flow_test)
-            echo "  max_flow_test: add a [tmc_flow_test] section to printer.cfg"
-            echo "                 optional macros: [include tmc_flow_test_macros.cfg]" ;;
+            echo "  max_flow_test: add a [tmc_flow_test] section to printer.cfg" ;;
     esac
 done
+echo "  (macro includes and Moonraker update entry were added automatically)"
 echo "  then: FIRMWARE_RESTART"
 echo ""
 echo "Docs: see the README.md inside each plugin folder."

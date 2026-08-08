@@ -39,7 +39,8 @@ The repo ships `speed_test_macros.cfg` with one `[gcode_macro]` per test
 They show up in the web UI's macro panel **with input fields for every
 parameter**; empty fields are not passed on, so the plugin defaults and your
 `[speed_test]` config stay in charge. `install.sh` links the file into
-`~/printer_data/config/`; enable it with:
+`~/printer_data/config/` and adds the include line to `printer.cfg`
+automatically; if you set it up by hand, add:
 
 ```ini
 [include speed_test_macros.cfg]

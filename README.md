@@ -32,10 +32,15 @@ bash ./install.sh
 
 The installer lets you **pick which plugins to install** (or pass them
 directly: `./install.sh all`, `./install.sh speed_test`,
-`./install.sh max_flow_test`). It symlinks the plugin files into Klipper's
-`extras` folder and the optional UI macros into your config directory.
+`./install.sh max_flow_test`). It does everything automatically:
 
-Then configure the plugin(s) in `printer.cfg` (see each plugin's README) and
+- symlinks the plugin files into Klipper's `extras` folder
+- symlinks the UI macros into your config directory and adds the
+  `[include …_macros.cfg]` lines to `printer.cfg`
+- registers the repo with Moonraker's update manager
+
+The only manual step left: add the plugin's config section to `printer.cfg`
+(e.g. `[speed_test]` / `[tmc_flow_test]` — see each plugin's README), then
 run `FIRMWARE_RESTART`.
 
 ## Updating
