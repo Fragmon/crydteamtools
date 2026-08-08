@@ -228,6 +228,13 @@ class MotorSync:
                     "sections have 'coolstep_threshold' set below "
                     "%.0f mm/s (SG2 drivers also need SpreadCycle: "
                     "no stealthchop_threshold)." % ctx['buzz_speed'])
+            gcmd.respond_info(
+                "    pass %d/%d %s: %s=%.0f  %s=%.0f  (n=%d+%d)"
+                % (rep + 1, ctx['repeats'],
+                   '→' if rep % 2 == 0 else '←',
+                   ctx['handles'][0].stepper_name, a,
+                   ctx['handles'][1].stepper_name, b,
+                   len(self.samples[0]), len(self.samples[1])))
             med_a.append(a)
             med_b.append(b)
             # Swap direction each pass so belt/friction asymmetry
@@ -308,6 +315,8 @@ class MotorSync:
 
         applied = 0
         try:
+            gcmd.respond_info("  measuring baseline (%d passes)..."
+                              % repeats)
             best, med_a, med_b = self._measure_score(gcmd, ctx)
             init_score = best
             gcmd.respond_info(
@@ -328,22 +337,24 @@ class MotorSync:
                             break
                         self._shift_secondary(ctx, direction * step)
                         applied += direction * step
+                        gcmd.respond_info(
+                            "  testing %+d msteps (total %+d)..."
+                            % (direction * step, applied))
                         score, med_a, med_b = self._measure_score(
                             gcmd, ctx)
                         if score > best + min_gain:
                             gcmd.respond_info(
-                                "  %+d msteps (total %+d): score %.1f "
-                                "→ improved" % (direction * step,
-                                                applied, score))
+                                "    → score %.1f (was %.1f) — "
+                                "improved, keeping %+d msteps"
+                                % (score, best, applied))
                             best = score
                         else:
                             self._shift_secondary(
                                 ctx, -direction * step)
                             applied -= direction * step
                             gcmd.respond_info(
-                                "  %+d msteps: score %.1f → no gain, "
-                                "reverted (total %+d)"
-                                % (direction * step, score, applied))
+                                "    → score %.1f — no gain, reverted "
+                                "to %+d msteps" % (score, applied))
                             break
                 step //= 2
 
