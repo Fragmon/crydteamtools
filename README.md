@@ -16,7 +16,9 @@ A collection of Klipper diagnostic and tuning plugins by **Steven (Fragmon) — 
 | **[Speed Test](speed_test/README.md)** | Finds a motor's real limits: max velocity, max acceleration per speed (limit map), square-corner velocity and the lowest run_current that still holds them — validated with a simulated print. CSV + interactive HTML reports, beginner-friendly control-panel GUI. | [speed_test/](speed_test/README.md) |
 | **[TMC Flow Test](max_flow_test/README.md)** | Finds your printer's real max flow rate in ~30 minutes without test prints: runs the extruder at rising flow rates and watches the TMC StallGuard signal for slip onset. Interactive dashboard with recommended slicer values. | [max_flow_test/](max_flow_test/README.md) |
 | **[Motor Sync](motor_sync/README.md)** | Synchronizes the two motors of a dual-motor axis (AWD, dual gantry) — **without an accelerometer**: out-of-phase motors fight each other, the extra load shows in StallGuard, and the plugin shifts one motor in microsteps until the fight is gone. Sync approach adapted from [MRX8024/motors-sync](https://github.com/MRX8024/motors-sync). | [motor_sync/](motor_sync/README.md) |
-| **[PA Test](pa_test/README.md)** *(prototype)* | Pressure-advance calibration via StallGuard: melt pressure loads the extruder motor, PA errors show up as step-response over/undershoot. Currently ships the feasibility probe; goal is an auto-generated adaptive-PA table (PA vs. flow) for OrcaSlicer. | [pa_test/](pa_test/README.md) |
+
+Upcoming plugins are developed on the [`dev` branch](https://github.com/Fragmon/crydteamtools/tree/dev)
+(currently there: **PA Test** — pressure-advance calibration via StallGuard).
 
 More plugins will join this collection — each lives in its own folder with its
 own README and docs.

@@ -23,14 +23,13 @@ chmod +x "$0" 2>/dev/null || true
 
 # ─── Plugin registry ──────────────────────────────────────────────
 # id | description | python files (relative) | macro file (optional)
-PLUGIN_IDS=(speed_test max_flow_test motor_sync pa_test)
+PLUGIN_IDS=(speed_test max_flow_test motor_sync)
 
 plugin_desc() {
     case "$1" in
         speed_test)    echo "Speed Test — motor velocity/accel/current limit finder" ;;
         max_flow_test) echo "TMC Flow Test — extruder max flow rate via StallGuard" ;;
         motor_sync)    echo "Motor Sync — dual-motor axis sync via StallGuard (no ADXL)" ;;
-        pa_test)       echo "PA Test — pressure-advance calibration via StallGuard (prototype)" ;;
     esac
 }
 plugin_files() {
@@ -38,7 +37,6 @@ plugin_files() {
         speed_test)    echo "speed_test/speed_test.py" ;;
         max_flow_test) echo "max_flow_test/tmc_flow_test.py" ;;
         motor_sync)    echo "motor_sync/motor_sync.py" ;;
-        pa_test)       echo "pa_test/pa_test.py" ;;
     esac
 }
 plugin_macros() {
@@ -46,7 +44,6 @@ plugin_macros() {
         speed_test)    echo "speed_test/speed_test_macros.cfg" ;;
         max_flow_test) echo "max_flow_test/tmc_flow_test_macros.cfg" ;;
         motor_sync)    echo "motor_sync/motor_sync_macros.cfg" ;;
-        pa_test)       echo "pa_test/pa_test_macros.cfg" ;;
     esac
 }
 # Commented config-section template, COPIED (not linked) into the
@@ -56,7 +53,6 @@ plugin_settings() {
         speed_test)    echo "speed_test/speed_test_settings.cfg" ;;
         max_flow_test) echo "max_flow_test/tmc_flow_test_settings.cfg" ;;
         motor_sync)    echo "motor_sync/motor_sync_settings.cfg" ;;
-        pa_test)       echo "pa_test/pa_test_settings.cfg" ;;
     esac
 }
 
@@ -241,8 +237,6 @@ for id in "${SELECTED[@]}"; do
             echo "  max_flow_test: uncomment [tmc_flow_test] in tmc_flow_test_settings.cfg" ;;
         motor_sync)
             echo "  motor_sync:    uncomment [motor_sync] in motor_sync_settings.cfg" ;;
-        pa_test)
-            echo "  pa_test:       uncomment [pa_test] in pa_test_settings.cfg" ;;
     esac
 done
 echo "  (includes, settings templates and Moonraker update entry were added automatically)"
