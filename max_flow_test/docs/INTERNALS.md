@@ -1,11 +1,11 @@
 # How slip detection works
 
-The plugin samples StallGuard at 50 Hz during each measurement step (5 repeats × 5 s by default). The first 10 % of every run is discarded (spin-up transient — SG2 reads near 0 while the motor accelerates, which would poison `sg_min` and the dip counter). From the remaining samples it tracks per-step **median**, **IQR (P25–P75)**, **run-to-run CV**, **collapse-dip count**, and **intra-run trend** (slope of SG over time within a single run).
+The plugin samples StallGuard at 50 Hz during each measurement step (5 repeats × 5 s by default). The first 10 % and last 5 % of every run are discarded (spin-up/spin-down transients — SG2 readings are invalid while the motor accelerates or decelerates, which would poison `sg_min`/`sg_max` and the dip/peak counters). From the remaining samples it tracks per-step **median**, **IQR (P25–P75)**, **run-to-run CV**, **collapse-dip count**, **unload-peak count**, and **intra-run trend** (slope of SG over time within a single run).
 
 Slip detection uses **multiple independent triggers** that look for different signatures:
 
 - **Collapse dips** (SG2 only) — samples below 25 % of the run median are brief stall events (stick-slip clicks). Median/IQR/CV absorb a handful of dips among hundreds of samples completely, so this is the primary trigger for audible click-stalls. Fires when the step's dip rate exceeds 1 % of samples (≥3 dips) and 3× the prior-step baseline. Logged as `sg_dips` / `sg_dip_rate_pct` in the CSV.
-- **Unload peaks** (SG2 only) — the extruder-grinding mirror image of the dip: when the drive gear grinds through the filament the motor is briefly *unloaded* and SG spikes above 145 % of the run median while the median stays smooth. Fires when the peak rate exceeds 0.3 % of samples (≥4 peaks) and 3× the prior-step baseline. Logged as `sg_peaks` / `sg_peak_rate_pct`.
+- **Unload peaks** (SG2 only) — the extruder-grinding mirror image of the dip: when the drive gear grinds through the filament the motor is briefly *unloaded* and SG spikes above 145 % of the run median while the median stays smooth. Fires when the peak rate exceeds 0.6 % of samples (≥8 peaks) and 3× the prior-step baseline. Logged as `sg_peaks` / `sg_peak_rate_pct`.
 - **SG signal patterns** — snap-back, over-jump, single-step plateau, 2-step cumulative plateau (with saturation-skip and median-baseline)
 - **Run-to-run variance** — CV spike, CV jump, rising trend, vs coarse-baseline
 - **Sample distribution** — IQR widening (single-step), IQR cumulative growth (vs early-test baseline), IQR vs coarse-baseline, IQR absolute floor

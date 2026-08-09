@@ -44,6 +44,10 @@ THERMAL_EVERY_N = 12      # thermal snapshot every Nth SG sample (~4 Hz)
 STARTUP_TRIM_FRACTION = 0.10  # drop first 10 % of each run's SG samples
                               # (spin-up transient reads near 0 on SG2
                               # and poisons sg_min / dip detection)
+TAIL_TRIM_FRACTION = 0.05     # drop last 5 % of each run: during the
+                              # deceleration ramp SG is equally invalid
+                              # and produced ~2 false dip/peak samples
+                              # per run (CSV 2026-08-09_09-10-42)
 MIN_HOTEND_TEMP = 180.0
 MODULE_NAME = "TMC Flow Test"
 MODULE_VERSION = "1.2.1"
@@ -163,9 +167,13 @@ class TriggerProfile:
     # (1 + PEAK_FRACTION) × run-median count as unload peaks —
     # counting samples instead of using sg_max makes a single stray
     # spike harmless.
+    # Thresholds validated against two real runs: full grind at
+    # flow=50 (08-37-15, ~1 % estimated peak rate) must fire, while
+    # 4 stray samples in 1241 during clean operation at flow=40
+    # (09-10-42, decel artefacts) must NOT.
     PEAK_FRACTION = 0.45            # peak = sample > 1.45 × run median
-    PEAK_MIN_COUNT = 4              # min peaks in the step to consider
-    PEAK_RATE_MIN = 0.003           # ≥ 0.3 % of the step's samples
+    PEAK_MIN_COUNT = 8              # min peaks in the step to consider
+    PEAK_RATE_MIN = 0.006           # ≥ 0.6 % of the step's samples
     PEAK_BASE_RATIO = 3.0           # and ≥ 3× prior-step baseline rate
 
     # ─── _check_run_outlier thresholds ─────────────────────────────
@@ -3366,13 +3374,18 @@ new Chart(document.getElementById('cvChart'), {
             active_thermal_samples.extend(self.samples_thermal)
 
             run_sg_raw = list(self.samples_sg)
-            # Trim the spin-up transient: while the motor accelerates
-            # from standstill SG2 reads near 0, which poisons sg_min
-            # and would drown real stall dips. (The intra-run trend
-            # code below does its own identical skip on the raw list.)
-            skip = (max(2, int(len(run_sg_raw) * STARTUP_TRIM_FRACTION))
-                    if len(run_sg_raw) >= 20 else 0)
-            run_sg = run_sg_raw[skip:]
+            # Trim the spin-up AND spin-down transients: while the
+            # motor accelerates from / decelerates to standstill, SG2
+            # readings are invalid in both directions — they poison
+            # sg_min/sg_max and the dip/peak counters. (The intra-run
+            # trend code below does its own skip on the raw list.)
+            n_raw = len(run_sg_raw)
+            if n_raw >= 20:
+                skip = max(2, int(n_raw * STARTUP_TRIM_FRACTION))
+                tail = max(1, int(n_raw * TAIL_TRIM_FRACTION))
+                run_sg = run_sg_raw[skip:n_raw - tail]
+            else:
+                run_sg = run_sg_raw
             per_run_sg.append(run_sg)
             if run_sg:
                 run_sg_avgs.append(sum(run_sg) / len(run_sg))
