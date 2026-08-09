@@ -20,6 +20,7 @@ Run the StallGuard-based flow test (Auto-SGT → Coarse → Bisection → Verifi
 | `PURGE` | 0 | Purge length (mm) before test |
 | `MAX_BISECT_STEPS` | 6 | Max bisection iterations |
 | `AUTO_SGT` | 1 | `1` = run Auto-SGT calibration before test (SG2 drivers only). `0` = skip |
+| `SAVE_SGT` | 0 | `1` = keep the auto-tuned SGT after the test AND stage it as `driver_SGT` for `SAVE_CONFIG` (persisted in printer.cfg). Overrides `KEEP_SGT` |
 | `KEEP_SGT` | 0 | `1` = leave the tuned SGT active until next FIRMWARE_RESTART. `0` = restore original after test |
 | `NO_HTML` | 0 | Set 1 to skip HTML report |
 | `SKIP_TMC_CHECK` | 0 | Set 1 to bypass config validation |
@@ -62,6 +63,30 @@ Diagnostic check: reads current SG value, verifies driver, chopper mode, and Sta
 ```
 TMC_FLOW_STATUS
 ```
+
+---
+
+## `TMC_FLOW_SGT_CALIBRATE`
+
+Standalone SGT tuning **with persistence**: runs the same probe-based
+auto-tune the main test uses (anchored at a low, slip-free flow), keeps the
+tuned value active and stages it as `driver_SGT` for Klipper's
+`SAVE_CONFIG`. After running it, execute `SAVE_CONFIG` — the value is
+written into printer.cfg's autosave block and survives every restart.
+SG2 drivers only (TMC5160/2130/2240). Hotend must be at printing
+temperature (it extrudes).
+
+| Parameter | Default | Description |
+|---|---|---|
+| `FLOW` | config `reference_flow` (15) | Probe flow (mm³/s) the SGT is calibrated at |
+| `SAVE` | 1 | `1` = stage for `SAVE_CONFIG`; `0` = session-only (until `FIRMWARE_RESTART`) |
+
+```
+TMC_FLOW_SGT_CALIBRATE
+SAVE_CONFIG
+```
+
+(UI macro: `CRYD_FLOW_SGT_CALIBRATE`)
 
 ---
 

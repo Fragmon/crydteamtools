@@ -497,6 +497,11 @@ class TMCFlowTest:
             'TMC_FLOW_STATUS', self.cmd_TMC_FLOW_STATUS,
             desc='Show current TMC StallGuard diagnostic values')
         self.gcode.register_command(
+            'TMC_FLOW_SGT_CALIBRATE', self.cmd_TMC_FLOW_SGT_CALIBRATE,
+            desc='Auto-tune the StallGuard SGT threshold at a low '
+                 'reference flow and stage the result for SAVE_CONFIG '
+                 '(persisted in printer.cfg)')
+        self.gcode.register_command(
             'TMC_FLOW_TEST_SG_VARIANTS',
             self.cmd_TMC_FLOW_TEST_SG_VARIANTS,
             desc='TMC2209-only diagnostic: probe SG_RESULT in both '
@@ -4961,14 +4966,49 @@ new Chart(document.getElementById('cvChart'), {
 
         return original_sgt, final_sgt
 
+    def _save_sgt_to_config(self, gcmd, sgt_value):
+        """Stage driver_SGT for Klipper's SAVE_CONFIG mechanism.
+
+        The value lands in printer.cfg's autosave block when the user
+        runs SAVE_CONFIG (which also restarts Klipper) — from then on
+        it survives every restart, overriding any driver_SGT in the
+        main config section.
+        """
+        section = "%s %s" % (self.driver_type, self.stepper_name)
+        try:
+            configfile = self.printer.lookup_object('configfile')
+            configfile.set(section, 'driver_SGT', int(sgt_value))
+            gcmd.respond_info(
+                "SGT %d staged for [%s].\n"
+                ">>> Run SAVE_CONFIG to write it into printer.cfg "
+                "(Klipper restarts). The value is then permanent."
+                % (int(sgt_value), section))
+            return True
+        except Exception as e:
+            gcmd.respond_info(
+                "Could not stage SGT for SAVE_CONFIG (%s). Add it "
+                "manually to [%s]:\n    driver_SGT: %d"
+                % (e, section, int(sgt_value)))
+            return False
+
     def _restore_sgt_if_needed(self, gcmd, original_sgt, final_sgt,
-                                keep_sgt, announce=True):
-        """Restore SGT to its original value unless keep_sgt is set
-        or the auto-tune was a no-op. Safe to call multiple times."""
+                                keep_sgt, announce=True,
+                                save_sgt=False):
+        """Restore SGT to its original value unless keep_sgt/save_sgt
+        is set or the auto-tune was a no-op. Safe to call multiple
+        times."""
         if (original_sgt is None
                 or final_sgt is None
                 or final_sgt == original_sgt):
             return  # nothing to do
+        if save_sgt:
+            if announce:
+                gcmd.respond_info(
+                    "Auto-SGT: SAVE_SGT=1 — keeping tuned SGT=%d "
+                    "active and staging it for SAVE_CONFIG."
+                    % final_sgt)
+            self._save_sgt_to_config(gcmd, final_sgt)
+            return
         if keep_sgt:
             if announce:
                 gcmd.respond_info(
@@ -4989,6 +5029,70 @@ new Chart(document.getElementById('cvChart'), {
                     "Auto-SGT: WARNING failed to restore original "
                     "SGT=%d. Run FIRMWARE_RESTART to reset."
                     % original_sgt)
+
+    def cmd_TMC_FLOW_SGT_CALIBRATE(self, gcmd):
+        """Standalone SGT tuning with persistence.
+
+        Runs the same probe-based auto-tune the main test uses,
+        anchored at a low reference flow, then stages the result as
+        driver_SGT for SAVE_CONFIG. SAVE=0 keeps the value active for
+        this session only (like KEEP_SGT on the main test).
+        """
+        default_flow = (self.reference_flow
+                        if self.reference_flow > 0 else 15.0)
+        flow = gcmd.get_float('FLOW', default_flow, above=0.)
+        save = gcmd.get_int('SAVE', 1, minval=0, maxval=1)
+
+        if not self._can_autotune_sgt():
+            raise gcmd.error(
+                "SGT auto-tune not supported on this driver "
+                "(needs the signed sgt field: TMC5160/2130/2240).")
+
+        # Hotend must be at printing temperature — this extrudes.
+        extruder = self.printer.lookup_object('extruder')
+        heater = extruder.get_heater()
+        cur_temp, _ = heater.get_temp(self.reactor.monotonic())
+        target_temp = heater.target_temp
+        if cur_temp < self.min_hotend_temp:
+            raise gcmd.error(
+                "Hotend too cold: %.1f°C (min %.1f°C). Heat it to "
+                "printing temperature first."
+                % (cur_temp, self.min_hotend_temp))
+        if target_temp > 0 and cur_temp < target_temp - 5.0:
+            raise gcmd.error(
+                "Hotend not at target: %.1f°C (target %.1f°C)."
+                % (cur_temp, target_temp))
+
+        gcmd.respond_info(
+            "──── SGT calibration ────\n"
+            "  driver: %s on %s | probe flow: %.1f mm³/s [FLOW]\n"
+            "  result is %s"
+            % (self.driver_type, self.stepper_name, flow,
+               "staged for SAVE_CONFIG [SAVE=1]" if save
+               else "session-only [SAVE=0]"))
+
+        self.gcode.run_script_from_command("M83\nG92 E0")
+        original_sgt, final_sgt = self._autotune_sgt(gcmd, flow)
+        if original_sgt is None or final_sgt is None:
+            gcmd.respond_info(
+                "SGT calibration did not produce a result — see the "
+                "messages above.")
+            return
+
+        if final_sgt == original_sgt:
+            gcmd.respond_info(
+                "SGT %d already in the target range — nothing to "
+                "change." % original_sgt)
+            return
+
+        if save:
+            self._save_sgt_to_config(gcmd, final_sgt)
+        else:
+            gcmd.respond_info(
+                "Tuned SGT=%d stays active until FIRMWARE_RESTART "
+                "(was %d). To persist it, re-run with SAVE=1 or add:\n"
+                "    driver_SGT: %d" % (final_sgt, original_sgt,
+                                        final_sgt))
 
     # ─── TMC_FLOW_TEST_SG_VARIANTS ─────────────────────────────────
     # Diagnostic for TMC2209 only. Trinamic states StallGuard4 is
@@ -5569,6 +5673,7 @@ new Chart(document.getElementById('cvChart'), {
             'SKIP_TMC_CHECK', 0, minval=0, maxval=1)
         auto_sgt = gcmd.get_int('AUTO_SGT', 1, minval=0, maxval=1)
         keep_sgt = gcmd.get_int('KEEP_SGT', 0, minval=0, maxval=1)
+        save_sgt = gcmd.get_int('SAVE_SGT', 0, minval=0, maxval=1)
         cold_extrusion_hint = gcmd.get_float(
             'COLD_EXTRUSION_HINT', 0.0, minval=0., maxval=200.)
         ref_flow = gcmd.get_float('REF_FLOW', self.reference_flow,
@@ -5825,7 +5930,7 @@ new Chart(document.getElementById('cvChart'), {
             self._save_report(results, meta, timestamp, None,
                               no_html, gcmd=gcmd)
             self._restore_sgt_if_needed(gcmd, original_sgt, final_sgt,
-                                         keep_sgt)
+                                         keep_sgt, save_sgt=save_sgt)
             return
 
         sweep_floor = ref_flows[-1] if ref_flows else start_flow
@@ -5835,7 +5940,7 @@ new Chart(document.getElementById('cvChart'), {
             self._save_report(results, meta, timestamp, first_trigger_reason,
                               no_html, gcmd=gcmd)
             self._restore_sgt_if_needed(gcmd, original_sgt, final_sgt,
-                                         keep_sgt)
+                                         keep_sgt, save_sgt=save_sgt)
             return
 
         # ─── PHASES 2 + 3: Bisection + Verify (with retry) ───
@@ -6138,7 +6243,7 @@ new Chart(document.getElementById('cvChart'), {
 
         # Restore SGT (unless KEEP_SGT=1)
         self._restore_sgt_if_needed(gcmd, original_sgt, final_sgt,
-                                     keep_sgt)
+                                     keep_sgt, save_sgt=save_sgt)
 
         # Restore part-cooling fan to whatever it was before the test
         try:
