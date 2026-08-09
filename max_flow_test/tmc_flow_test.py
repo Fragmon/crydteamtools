@@ -46,7 +46,7 @@ STARTUP_TRIM_FRACTION = 0.10  # drop first 10 % of each run's SG samples
                               # and poisons sg_min / dip detection)
 MIN_HOTEND_TEMP = 180.0
 MODULE_NAME = "TMC Flow Test"
-MODULE_VERSION = "1.1.0"
+MODULE_VERSION = "1.2.0"
 SG_MIN_INFORMATIVE = 50   # below this SG value, readings are noise
 
 
@@ -153,6 +153,20 @@ class TriggerProfile:
     DIP_MIN_COUNT = 3               # min dips in the step to consider
     DIP_RATE_MIN = 0.01             # ≥ 1 % of the step's samples
     DIP_BASE_RATIO = 3.0            # and ≥ 3× prior-step baseline rate
+
+    # ─── _check_peak_unload thresholds (SG2 only) ──────────────────
+    # The EXTRUDER counterpart of the dip: when the gear grinds
+    # through the filament, the motor is UNLOADED and SG spikes UP
+    # toward its no-load value while the median stays smooth
+    # (validated: CSV 2026-08-09_08-37-15, full grind at flow=50 with
+    # sg_max 1.6× median but compact median/IQR/CV). Samples above
+    # (1 + PEAK_FRACTION) × run-median count as unload peaks —
+    # counting samples instead of using sg_max makes a single stray
+    # spike harmless.
+    PEAK_FRACTION = 0.45            # peak = sample > 1.45 × run median
+    PEAK_MIN_COUNT = 4              # min peaks in the step to consider
+    PEAK_RATE_MIN = 0.003           # ≥ 0.3 % of the step's samples
+    PEAK_BASE_RATIO = 3.0           # and ≥ 3× prior-step baseline rate
 
     # ─── _check_run_outlier thresholds ─────────────────────────────
     OUTLIER_MAD_RATIO = 4.0         # deviation ≥ this × MAD
@@ -368,11 +382,12 @@ class TMC2209Profile(TriggerProfile):
     BORDER_IQR_LOW = 30
     BORDER_IQR_HIGH = 50
 
-    # ─── Dip-collapse trigger DISABLED ────────────────────────────
+    # ─── Dip-collapse / peak-unload triggers DISABLED ─────────────
     # SG4 sticks in a low "bias region" at low velocity and its
-    # magnitude doesn't follow the SG2 collapse model — low samples
-    # are normal, not stalls.
+    # magnitude doesn't follow the SG2 collapse/unload model — low or
+    # high samples are normal, not stalls.
     DIP_MIN_COUNT = 999999
+    PEAK_MIN_COUNT = 999999
 
     # ─── Outlier detection (single-run slip in 5 reps) ────────────
     OUTLIER_MAD_RATIO = 4.0
@@ -861,6 +876,7 @@ class TMCFlowTest:
             base_header = ("phase,flow_mm3s,sg_median,sg_p25,sg_p75,sg_avg,"
                            "sg_min,sg_max,sg_n,n_repeats,sg_run_cv_pct,"
                            "sg_dips,sg_dip_rate_pct,"
+                           "sg_peaks,sg_peak_rate_pct,"
                            "run_sg_avgs,"
                            "temp_target,temp_start,temp_end,temp_min,"
                            "temp_avg,temp_drop,"
@@ -904,8 +920,9 @@ class TMCFlowTest:
                     return "%d" % v
 
                 dip = r.get('dip') or {}
+                peak = r.get('peak') or {}
                 base_row = ("%s,%.2f,%s,%s,%s,%s,%s,%s,%s,"
-                            "%d,%s,%s,%s,%s,"
+                            "%d,%s,%s,%s,%s,%s,%s,"
                             "%s,%s,%s,%s,%s,%s,"
                             "%s,%s,%s,"
                             "%s,%s") % (
@@ -918,6 +935,8 @@ class TMCFlowTest:
                     "%.1f" % rc.get('sg_cv', 0) if rc else '',
                     str(dip.get('count', '')),
                     "%.2f" % (dip['rate'] * 100) if dip else '',
+                    str(peak.get('count', '')),
+                    "%.2f" % (peak['rate'] * 100) if peak else '',
                     '|'.join("%.1f" % v for v in run_sg),
                     fmt_t(th, 'temp_target'),
                     fmt_t(th, 'temp_start'),
@@ -3377,24 +3396,35 @@ new Chart(document.getElementById('cvChart'), {
 
         sg_stats = self._stats(agg_sg)
 
-        # Collapse-dip counting (SG2 only): samples far below the run
-        # median are brief stall events. Thanks to the spin-up trim
-        # above, a clean run has essentially none of these.
+        # Collapse-dip and unload-peak counting (SG2 only): samples
+        # far BELOW the run median are brief motor-stall events;
+        # samples far ABOVE it are unload events — the extruder gear
+        # grinding through the filament removes the load and SG snaps
+        # toward its no-load value. Thanks to the spin-up trim above,
+        # a clean run has essentially none of either.
         dip_agg = None
+        peak_agg = None
         if self.sg2_driver:
             dip_count = 0
-            dip_n = 0
+            peak_count = 0
+            agg_n = 0
             for idx in included_indices:
                 samples = per_run_sg[idx]
                 if len(samples) < 10:
                     continue
                 run_median = sorted(samples)[len(samples) // 2]
-                threshold = run_median * self.profile.DIP_FRACTION
-                dip_count += sum(1 for s in samples if s < threshold)
-                dip_n += len(samples)
-            if dip_n > 0:
-                dip_agg = {'count': dip_count, 'n': dip_n,
-                           'rate': dip_count / dip_n}
+                dip_thresh = run_median * self.profile.DIP_FRACTION
+                peak_thresh = run_median * (
+                    1.0 + self.profile.PEAK_FRACTION)
+                dip_count += sum(1 for s in samples if s < dip_thresh)
+                peak_count += sum(1 for s in samples
+                                  if s > peak_thresh)
+                agg_n += len(samples)
+            if agg_n > 0:
+                dip_agg = {'count': dip_count, 'n': agg_n,
+                           'rate': dip_count / agg_n}
+                peak_agg = {'count': peak_count, 'n': agg_n,
+                            'rate': peak_count / agg_n}
 
         included_sg_avgs = [run_sg_avgs[i] for i in included_indices
                             if i < len(run_sg_avgs)]
@@ -3417,6 +3447,8 @@ new Chart(document.getElementById('cvChart'), {
         warmup_str = ' [run 1 excluded as warmup]' if warmup_dropped else ''
         dip_str = (' | dips = %d' % dip_agg['count']
                    if dip_agg and dip_agg['count'] > 0 else '')
+        if peak_agg and peak_agg['count'] > 0:
+            dip_str += ' | peaks = %d' % peak_agg['count']
         gcmd.respond_info(
             "  %.1f mm³/s | SG median = %s | "
             "run-to-run CV = %s%s%s"
@@ -3452,6 +3484,7 @@ new Chart(document.getElementById('cvChart'), {
             'run_sg_avgs': run_sg_avgs,
             'warmup_dropped': warmup_dropped,
             'dip': dip_agg,
+            'peak': peak_agg,
             'thermal': thermal_agg,
             'intra_run': self._aggregate_intra_run_trends(per_run_trends),
         }
@@ -3693,6 +3726,12 @@ new Chart(document.getElementById('cvChart'), {
         if dip_reason:
             return dip_reason
 
+        # Trigger 0b: unload peaks (SG2 only) — the extruder-grinding
+        # mirror image of the collapse dip.
+        peak_reason = self._check_peak_unload(results, sg_label)
+        if peak_reason:
+            return peak_reason
+
         # Trigger 3: run-to-run CV spike. Intermittent slip shows up as
         # a sudden burst of variance between repeats at the same flow,
         # even when the median doesn't move much. Fire when the latest
@@ -3765,6 +3804,40 @@ new Chart(document.getElementById('cvChart'), {
                     "%.1f%%) — brief stall events (stick-slip)"
                     % (sg_label, dip['count'], dip['n'],
                        p.DIP_FRACTION * 100, rate * 100, baseline * 100))
+        return None
+
+    def _check_peak_unload(self, results, sg_label):
+        """Detect unload peaks — the extruder-grinding signature.
+
+        When the drive gear grinds through the filament the motor is
+        briefly UNLOADED and SG spikes toward its no-load value while
+        median/IQR/CV stay compact (the mirror image of the collapse
+        dip). Counting samples above (1+PEAK_FRACTION) × run-median
+        makes a single stray sg_max outlier harmless — the trigger
+        needs a sustained peak rate above the prior-step baseline.
+        """
+        if not self.sg2_driver:
+            return None
+        p = self.profile
+        peak = results[-1].get('peak')
+        if not peak or peak['n'] == 0:
+            return None
+        rate = peak['rate']
+        if peak['count'] < p.PEAK_MIN_COUNT or rate < p.PEAK_RATE_MIN:
+            return None
+        prior_rates = sorted(
+            r['peak']['rate'] for r in results[:-1]
+            if r.get('peak') and r['peak']['n'] > 0)
+        baseline = (prior_rates[len(prior_rates) // 2]
+                    if prior_rates else 0.0)
+        if rate >= max(p.PEAK_RATE_MIN, baseline * p.PEAK_BASE_RATIO):
+            return ("%s unload peaks: %d of %d samples above %.0f%% of "
+                    "the run median (%.2f%% of samples vs baseline "
+                    "%.2f%%) — motor repeatedly unloaded (gear "
+                    "grinding through the filament)"
+                    % (sg_label, peak['count'], peak['n'],
+                       (1.0 + p.PEAK_FRACTION) * 100,
+                       rate * 100, baseline * 100))
         return None
 
     def _check_cv_spike(self, results, sg_label):
