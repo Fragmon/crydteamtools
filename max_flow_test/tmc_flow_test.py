@@ -46,7 +46,7 @@ STARTUP_TRIM_FRACTION = 0.10  # drop first 10 % of each run's SG samples
                               # and poisons sg_min / dip detection)
 MIN_HOTEND_TEMP = 180.0
 MODULE_NAME = "TMC Flow Test"
-MODULE_VERSION = "1.2.0"
+MODULE_VERSION = "1.2.1"
 SG_MIN_INFORMATIVE = 50   # below this SG value, readings are noise
 
 
@@ -421,6 +421,16 @@ class TMCFlowTest:
             'melt_zone_length', 42.0, above=0.)
         self.min_hotend_temp = config.getfloat(
             'min_hotend_temp', MIN_HOTEND_TEMP, above=0.)
+
+        # Fixed low reference flow (mm³/s) measured BEFORE the coarse
+        # sweep whenever START is well above it. The two reference
+        # steps give every baseline-driven trigger (CV, dips, peaks,
+        # IQR, gap) clean slip-free data to compare against and anchor
+        # the SGT auto-tune — without them a high START would leave
+        # the early sweep steps trigger-blind or with slip-polluted
+        # baselines. 0 disables the reference phase.
+        self.reference_flow = config.getfloat(
+            'reference_flow', 15.0, minval=0.)
 
         # Part-cooling fan speed during the test (0-100 %). Set in
         # config or override via `FAN_SPEED=` on TMC_FLOW_FIND_MAX.
@@ -3560,10 +3570,17 @@ new Chart(document.getElementById('cvChart'), {
         # ─── bisection, the trend baseline is meaningless because we
         # ─── jump around the slip point.
         if going_up:
+            # Trend/plateau logic works on the sweep steps only —
+            # reference steps are excluded because the flow jump from
+            # the reference block to the sweep start would poison the
+            # delta baseline (the trigger checks never run DURING the
+            # reference phase, so tr[-1] is always the current step).
+            tr = [r for r in results
+                  if r.get('phase', 'coarse') != 'ref']
             # Raw step-to-step SG deltas from recent history.
             sg_deltas = []
-            for j in range(max(1, len(results) - 5), len(results) - 1):
-                rj, rj_prev = results[j], results[j-1]
+            for j in range(max(1, len(tr) - 5), len(tr) - 1):
+                rj, rj_prev = tr[j], tr[j-1]
                 if rj.get('sg') and rj_prev.get('sg'):
                     sg_deltas.append(
                         rj['sg']['median'] - rj_prev['sg']['median'])
@@ -3578,7 +3595,7 @@ new Chart(document.getElementById('cvChart'), {
                 # curve look like a "plateau" trigger.
                 sorted_deltas = sorted(sg_deltas)
                 expected_delta = sorted_deltas[len(sorted_deltas) // 2]
-                actual_delta = sg_med - results[-2]['sg']['median']
+                actual_delta = sg_med - tr[-2]['sg']['median']
 
                 # Trend direction (+1 = SG rises with load, -1 = SG falls
                 # with load, 0 = flat / inconclusive). Use 1 raw unit as
@@ -3660,12 +3677,12 @@ new Chart(document.getElementById('cvChart'), {
                     # MUCH steeper than reality, so the trigger then
                     # interprets normal saturation behaviour later in
                     # the sweep as a "stalled trend".
-                    last_phase = results[-1].get('phase', 'coarse')
+                    last_phase = tr[-1].get('phase', 'coarse')
                     prior_sg_max = max(
-                        results[j]['sg']['median']
-                        for j in range(max(0, len(results) - 5),
-                                       len(results) - 1)
-                        if results[j].get('sg'))
+                        tr[j]['sg']['median']
+                        for j in range(max(0, len(tr) - 5),
+                                       len(tr) - 1)
+                        if tr[j].get('sg'))
                     saturation_skip = (
                         prior_sg_max
                         > self.profile.PLATEAU_SATURATION_SKIP)
@@ -3698,8 +3715,8 @@ new Chart(document.getElementById('cvChart'), {
                                        actual_load, expected_load))
 
                         # Cumulative 2-step check (existing logic)
-                        prev_actual = (results[-2]['sg']['median']
-                                       - results[-3]['sg']['median'])
+                        prev_actual = (tr[-2]['sg']['median']
+                                       - tr[-3]['sg']['median'])
                         cumulative_load = (actual_load
                                            + prev_actual * trend_sign)
                         expected_2step = expected_load * 2
@@ -3892,7 +3909,7 @@ new Chart(document.getElementById('cvChart'), {
 
         coarse_cvs = []
         for r in results[:-1]:
-            if r.get('phase', 'coarse') != 'coarse':
+            if r.get('phase', 'coarse') not in ('coarse', 'ref'):
                 continue
             rc = r.get('run_consistency') or {}
             if 'sg_cv' in rc:
@@ -4022,7 +4039,7 @@ new Chart(document.getElementById('cvChart'), {
         if not in_bisection:
             coarse_iqrs = []
             for r in results[:-1]:
-                if r.get('phase', 'coarse') != 'coarse':
+                if r.get('phase', 'coarse') not in ('coarse', 'ref'):
                     continue
                 sg_p = r.get('sg') or {}
                 if 'p25' in sg_p and 'p75' in sg_p:
@@ -4113,7 +4130,7 @@ new Chart(document.getElementById('cvChart'), {
             coarse_iqrs = []
             coarse_cvs = []
             for r in results[:-1]:
-                if r.get('phase', 'coarse') != 'coarse':
+                if r.get('phase', 'coarse') not in ('coarse', 'ref'):
                     continue
                 sg_p = r.get('sg') or {}
                 if 'p25' in sg_p and 'p75' in sg_p:
@@ -4203,7 +4220,7 @@ new Chart(document.getElementById('cvChart'), {
         coarse_mins = []
         coarse_meds = []
         for r in results[:-1]:
-            if r.get('phase', 'coarse') != 'coarse':
+            if r.get('phase', 'coarse') not in ('coarse', 'ref'):
                 continue
             sg_p = r.get('sg') or {}
             if 'max' in sg_p:
@@ -4470,7 +4487,7 @@ new Chart(document.getElementById('cvChart'), {
         coarse_cvs = []
         coarse_iqrs = []
         for r in results[:-1]:
-            if r.get('phase', 'coarse') != 'coarse':
+            if r.get('phase', 'coarse') not in ('coarse', 'ref'):
                 continue
             rc = r.get('run_consistency') or {}
             sg_p = r.get('sg') or {}
@@ -4549,7 +4566,7 @@ new Chart(document.getElementById('cvChart'), {
         coarse_cvs = []
         coarse_iqrs = []
         for r in results:
-            if r.get('phase', 'coarse') != 'coarse':
+            if r.get('phase', 'coarse') not in ('coarse', 'ref'):
                 continue
             rc = r.get('run_consistency') or {}
             sg_p = r.get('sg') or {}
@@ -5554,6 +5571,8 @@ new Chart(document.getElementById('cvChart'), {
         keep_sgt = gcmd.get_int('KEEP_SGT', 0, minval=0, maxval=1)
         cold_extrusion_hint = gcmd.get_float(
             'COLD_EXTRUSION_HINT', 0.0, minval=0., maxval=200.)
+        ref_flow = gcmd.get_float('REF_FLOW', self.reference_flow,
+                                  minval=0.)
 
         # Part-cooling fan speed for the test. Defaults to the value
         # in [tmc_flow_test] config (or 0 if not set). Override per
@@ -5614,11 +5633,25 @@ new Chart(document.getElementById('cvChart'), {
         # so we set the same mode here. Without this, only the first
         # repetition extrudes anything — subsequent reps see "G1 E5"
         # as "go TO position 5" and the extruder is already there.
+        # Reference phase plan: two fixed low-flow steps before the
+        # sweep, only when START is clearly above them (otherwise the
+        # sweep itself starts low and refs would just cost time).
+        ref_flows = []
+        if ref_flow > 0:
+            ref2 = ref_flow + 5.0
+            if start_flow >= ref2 + 5.0:
+                ref_flows = [ref_flow, ref2]
+
         original_sgt = None
         final_sgt = None
         if auto_sgt and self._can_autotune_sgt():
             self.gcode.run_script_from_command("M83\nG92 E0")
-            original_sgt, final_sgt = self._autotune_sgt(gcmd, start_flow)
+            # Anchor the SGT calibration at the reference flow when a
+            # reference phase runs — probing at a high START would
+            # calibrate against near-slip load.
+            sgt_probe_flow = ref_flows[0] if ref_flows else start_flow
+            original_sgt, final_sgt = self._autotune_sgt(
+                gcmd, sgt_probe_flow)
 
         rotation_distance = self._get_rotation_distance(extruder)
         if rotation_distance is None:
@@ -5640,6 +5673,9 @@ new Chart(document.getElementById('cvChart'), {
             'rotation_distance': '%.4f mm' % rotation_distance,
             'flow_range': '%.1f → %.1f mm³/s (adaptive)' % (
                 start_flow, max_flow),
+            'reference_flow': ('%.1f + %.1f mm³/s'
+                               % (ref_flows[0], ref_flows[1])
+                               if ref_flows else 'skipped'),
             'step_duration': '%.1f s' % step_duration,
             'cold_extrusion_hint': cold_extrusion_hint,
             'tmc_settings': self._snapshot_tmc_settings(),
@@ -5708,6 +5744,23 @@ new Chart(document.getElementById('cvChart'), {
             """SG-based slip detection."""
             return self._check_triggers_sg(results)
 
+        # ─── PHASE 0: Reference (baseline) ───
+        # Two fixed low-flow steps far below any realistic limit.
+        # They feed the trigger baselines (CV, dips, peaks, IQR, gap)
+        # with guaranteed slip-free data, so the sweep's very first
+        # step is already fully trigger-armed even with a high START.
+        if ref_flows:
+            gcmd.respond_info(
+                "\n>>> Phase 0: Reference baseline <<<\n"
+                "  Measuring %s mm³/s — slip-free reference for the "
+                "trigger baselines (START=%.0f is far above; disable "
+                "with REF_FLOW=0)."
+                % (" + ".join("%.0f" % f for f in ref_flows),
+                   start_flow))
+            for rf in ref_flows:
+                measure_and_save(rf, 'ref')
+                self.gcode.run_script_from_command("G4 P500")
+
         # ─── PHASE 1: Coarse ───
         gcmd.respond_info(
             "\n>>> Phase 1: Coarse Upward Sweep <<<\n"
@@ -5746,6 +5799,12 @@ new Chart(document.getElementById('cvChart'), {
             if reason:
                 high = flow
                 low = flow - coarse_step
+                if low < start_flow and ref_flows:
+                    # Trigger on the very first sweep step: fall back
+                    # to the highest reference step as the safe lower
+                    # bound instead of aborting — the refs are proven
+                    # slip-free measurements.
+                    low = ref_flows[-1]
                 first_trigger_reason = reason
                 _record_event('coarse', flow, 'trigger', reason,
                               results[-1] if results else None)
@@ -5769,7 +5828,8 @@ new Chart(document.getElementById('cvChart'), {
                                          keep_sgt)
             return
 
-        if low < start_flow:
+        sweep_floor = ref_flows[-1] if ref_flows else start_flow
+        if low < sweep_floor:
             gcmd.respond_info(
                 "Trigger fired on first step (%.1f) — lower START." % high)
             self._save_report(results, meta, timestamp, first_trigger_reason,
@@ -5958,12 +6018,12 @@ new Chart(document.getElementById('cvChart'), {
                 # trigger.
                 fallback = None
                 for r in reversed(results[:-1]):  # skip the failed verify
-                    if r.get('phase') in ('coarse', 'bisect'):
+                    if r.get('phase') in ('coarse', 'bisect', 'ref'):
                         if r['flow'] < low - 0.001:
                             fallback = r['flow']
                             break
                 if fallback is None:
-                    fallback = max(start_flow, low - min_step)
+                    fallback = max(sweep_floor, low - min_step)
                 gcmd.respond_info(
                     "  Maximum verify retries reached — falling back "
                     "to last known-good flow %.1f mm³/s." % fallback)
@@ -5991,7 +6051,7 @@ new Chart(document.getElementById('cvChart'), {
             # one min_step below if no earlier safe step exists.
             new_low = None
             for r in reversed(results[:-1]):  # skip failed verify
-                if r.get('phase') in ('coarse', 'bisect'):
+                if r.get('phase') in ('coarse', 'bisect', 'ref'):
                     if r['flow'] < high - 0.001:
                         # Was this flow a safe one?  Check it didn't
                         # carry a trigger.
@@ -6008,7 +6068,7 @@ new Chart(document.getElementById('cvChart'), {
                             new_low = r['flow']
                             break
             if new_low is None:
-                new_low = max(start_flow, high - 2 * min_step)
+                new_low = max(sweep_floor, high - 2 * min_step)
             low = new_low
             last_trigger_reason = verify_trigger
             gcmd.respond_info(

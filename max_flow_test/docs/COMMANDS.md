@@ -11,6 +11,7 @@ Run the StallGuard-based flow test (Auto-SGT → Coarse → Bisection → Verifi
 | `START` | 10 | Starting flow (mm³/s) |
 | `MAX` | 80 | Upper search bound |
 | `COARSE_STEP` | 10 | Coarse sweep step size (use 5 for low-flow setups) |
+| `REF_FLOW` | 15 (config `reference_flow`) | Fixed low reference flow. When `START` is well above it, two slip-free reference steps (`REF_FLOW` and `REF_FLOW`+5) run before the sweep and anchor the trigger baselines and Auto-SGT — so a high `START` can't blind the detection. `0` disables |
 | `MIN_STEP` | 1 | Bisection precision |
 | `DURATION` | 5 | Seconds per measurement |
 | `REPEAT` | 5 | Repetitions per measurement |
