@@ -71,6 +71,18 @@ Your existing `[tmcXXXX extruder]` section also needs `driver_SFILT: 1` (TMC5160
 - Chube Air: ~42 mm
 - Goliath / CHC-XL: ~50 mm
 
+## Control panel (GUI)
+
+New to the plugin? Run **`TMC_FLOW_GUI`** — it writes a beginner-friendly web
+page into the Flowtest folder that builds the commands for you: a live
+checklist of your driver (and every StallGuard problem it finds), hotend
+presets, plain-language help on every field, a runtime estimate, and a
+**Copy** / **Send to printer** button for the finished command.
+
+**[How to use it →](docs/GUI.md)**
+
+---
+
 ## Run a test
 
 Move the toolhead **above the bed with at least 50 mm of clearance** — the test extrudes 2-5 meters of filament. Then in your printer console:
@@ -133,6 +145,7 @@ Copy the **80% value** from the hero panel into your slicer's max volumetric spe
 
 ## Need more?
 
+- **Control panel (GUI)** → [docs/GUI.md](docs/GUI.md)
 - **Driver-specific tuning, chopper mode internals, TMC2209 setup** → [docs/ADVANCED.md](docs/ADVANCED.md)
 - **Command reference** → [docs/COMMANDS.md](docs/COMMANDS.md)
 - **How slip detection works** → [docs/INTERNALS.md](docs/INTERNALS.md)

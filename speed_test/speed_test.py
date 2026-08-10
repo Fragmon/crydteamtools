@@ -64,7 +64,10 @@ class SpeedTest:
         if not os.path.isdir(config_dir):
             config_dir = os.path.expanduser('~')
         default_dir = os.path.join(config_dir, 'Speedtest')
-        self.output_dir = config.get('output_dir', default_dir)
+        # expanduser: a '~/...' value from the config would otherwise
+        # create a literal '~' directory next to klippy.
+        self.output_dir = os.path.expanduser(
+            config.get('output_dir', default_dir))
 
         # State
         self._last_mcu_pos = {}

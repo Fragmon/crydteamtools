@@ -362,6 +362,24 @@ for id in "${SELECTED[@]}"; do
         fi
         add_include_top "$(basename "$settings_rel")"
     fi
+    # ── One-time migration (max_flow_test only) ──
+    # [tmc_flow_test] used to be shipped ACTIVE inside the symlinked
+    # macros file. It now lives in the copied settings file. If no
+    # active section exists anywhere, activate it there — otherwise a
+    # plain 'git pull' would silently unload the plugin, and a user
+    # following "uncomment it" while the old macros file still had it
+    # would hit a duplicate-section error.
+    if [ "$id" = "max_flow_test" ] && [ -d "${CONFIG_DIR}" ]; then
+        if ! grep -rEqs --include='*.cfg' '^[[:space:]]*\[tmc_flow_test\]' \
+             "${CONFIG_DIR}"; then
+            st="${CONFIG_DIR}/tmc_flow_test_settings.cfg"
+            if [ -f "$st" ] && grep -q '^#\[tmc_flow_test\]' "$st"; then
+                sed -i 's/^#\[tmc_flow_test\]/[tmc_flow_test]/' "$st"
+                echo "  ✓ [tmc_flow_test] activated in tmc_flow_test_settings.cfg"
+                echo "    (the section moved out of the macros file — edit it there now)"
+            fi
+        fi
+    fi
 done
 
 # ─── Moonraker update manager ─────────────────────────────────────
@@ -406,7 +424,8 @@ for id in "${SELECTED[@]}"; do
         speed_test)
             echo "  speed_test:    uncomment [speed_test] in speed_test_settings.cfg" ;;
         max_flow_test)
-            echo "  max_flow_test: uncomment [tmc_flow_test] in tmc_flow_test_settings.cfg" ;;
+            echo "  max_flow_test: settings in tmc_flow_test_settings.cfg"
+            echo "                 (section already active — adjust extruder/filament there)" ;;
         motor_sync)
             echo "  motor_sync:    uncomment [motor_sync] in motor_sync_settings.cfg" ;;
         pa_test)

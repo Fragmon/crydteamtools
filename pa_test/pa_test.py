@@ -49,8 +49,8 @@ class PATest:
         config_dir = os.path.expanduser('~/printer_data/config')
         if not os.path.isdir(config_dir):
             config_dir = os.path.expanduser('~')
-        self.output_dir = config.get(
-            'output_dir', os.path.join(config_dir, 'PAtest'))
+        self.output_dir = os.path.expanduser(config.get(
+            'output_dir', os.path.join(config_dir, 'PAtest')))
 
         self.filament_area = math.pi * (self.filament_diameter / 2.) ** 2
 

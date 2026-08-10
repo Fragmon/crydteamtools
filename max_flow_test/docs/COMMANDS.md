@@ -22,6 +22,8 @@ Run the StallGuard-based flow test (Auto-SGT → Coarse → Bisection → Verifi
 | `AUTO_SGT` | 1 | `1` = run Auto-SGT calibration before test (SG2 drivers only). `0` = skip |
 | `SAVE_SGT` | 0 | `1` = keep the auto-tuned SGT after the test AND stage it as `driver_SGT` for `SAVE_CONFIG` (persisted in printer.cfg). Overrides `KEEP_SGT` |
 | `KEEP_SGT` | 0 | `1` = leave the tuned SGT active until next FIRMWARE_RESTART. `0` = restore original after test |
+| `FAN_SPEED` | config `test_fan_speed` (0) | Part-cooling fan speed in % (0–100), locked for the whole test and restored afterwards — fan speed materially changes the achievable max flow |
+| `COLD_EXTRUSION_HINT` | 0 | Flow (mm³/s) you observed as under-extruding; drawn as a marker line in the HTML report. Report-only, the detection ignores it |
 | `NO_HTML` | 0 | Set 1 to skip HTML report |
 | `SKIP_TMC_CHECK` | 0 | Set 1 to bypass config validation |
 
@@ -63,6 +65,20 @@ Diagnostic check: reads current SG value, verifies driver, chopper mode, and Sta
 ```
 TMC_FLOW_STATUS
 ```
+
+---
+
+## `TMC_FLOW_GUI`
+
+Writes the beginner-friendly **control panel** (`tmc_flow_gui.html`) into the
+output folder, with your live driver/config values baked in. No parameters.
+See **[GUI.md](GUI.md)**.
+
+```
+TMC_FLOW_GUI
+```
+
+(UI macro: `CRYD_FLOW_GUI`)
 
 ---
 

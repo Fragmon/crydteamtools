@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TMC Flow Test — Control Panel</title>
+<style>
+:root{ --bg:#f7f1ea; --card:#fff; --ink:#241f1a; --muted:#7a6f63;
+  --hot:#d2601a; --hot2:#f3922b; --green:#2e9e5b; --amber:#b8860b;
+  --red:#b3261e; --line:#efe6da; }
+*{ box-sizing:border-box; }
+body{ font-family:'Segoe UI',system-ui,sans-serif; background:var(--bg);
+  color:var(--ink); margin:0; padding:0 16px 60px; line-height:1.55; }
+.wrap{ max-width:920px; margin:0 auto; }
+header.hero{ background:linear-gradient(135deg,#c2410c,#f59e0b); color:#fff;
+  border-radius:0 0 18px 18px; padding:24px 26px 20px; margin:0 -16px 22px;
+  box-shadow:0 8px 22px rgba(194,65,12,.28); }
+header.hero h1{ margin:0; font-size:22px; }
+header.hero .sub{ margin-top:6px; font-size:13px; opacity:.94; }
+.card{ background:var(--card); border-radius:14px; padding:18px 20px;
+  margin-bottom:18px; box-shadow:0 2px 12px rgba(80,50,20,.07);
+  border:1px solid var(--line); }
+.card h2{ margin:0 0 6px; font-size:16px; color:var(--hot); }
+.card .lead{ margin:0 0 12px; color:var(--muted); font-size:13.5px; }
+.step{ display:inline-block; background:var(--hot); color:#fff;
+  border-radius:50%; width:22px; height:22px; text-align:center;
+  line-height:22px; font-size:13px; font-weight:700; margin-right:8px; }
+.checks li{ margin:6px 0; font-size:14px; }
+.ok{ color:var(--green); font-weight:600; }
+.warn{ color:var(--red); font-weight:600; }
+.testgrid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+  gap:10px; }
+.testcard{ border:2px solid var(--line); border-radius:11px; padding:12px 14px;
+  cursor:pointer; transition:border-color .12s, background .12s; }
+.testcard:hover{ border-color:#f0cba0; }
+.testcard.sel{ border-color:var(--hot2); background:#fff7ed; }
+.testcard b{ display:block; font-size:14px; }
+.testcard span{ font-size:12px; color:var(--muted); }
+.badge{ display:inline-block; font-size:10.5px; font-weight:700;
+  letter-spacing:.4px; padding:2px 8px; border-radius:20px; margin-left:6px;
+  background:#e2efe6; color:var(--green); vertical-align:2px; }
+.badge.grey{ background:#f0ece6; color:var(--muted); }
+.presets{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
+.presets button{ font-size:13px; padding:7px 14px; border:1.5px solid var(--line);
+  border-radius:20px; background:#fdfbf8; cursor:pointer; }
+.presets button.sel{ border-color:var(--hot2); background:#fff7ed;
+  color:var(--hot); font-weight:600; }
+.fields{ display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr));
+  gap:12px 16px; }
+.field label{ display:block; font-weight:600; font-size:13px; margin-bottom:3px; }
+.field input, .field select{ width:100%; font-size:14px; padding:7px 10px;
+  border:1px solid #ded3c5; border-radius:8px; background:#fdfbf8; }
+.field .hint{ display:block; margin-top:3px; color:var(--muted); font-size:11.5px; }
+details{ margin-top:12px; }
+details summary{ cursor:pointer; font-size:13px; color:var(--hot);
+  font-weight:600; }
+details .fields{ margin-top:12px; }
+.est{ margin-top:12px; font-size:13px; background:#fff7ed; border:1px solid #f7dcbb;
+  border-radius:9px; padding:9px 12px; color:#8a4b12; }
+.cmdbox{ background:#1c1611; color:#f3e2cf; border-radius:10px; padding:14px 16px;
+  font-family:Consolas,monospace; font-size:13px; word-break:break-all;
+  min-height:44px; }
+.actions{ display:flex; gap:10px; margin-top:12px; flex-wrap:wrap; }
+.actions button{ font-size:14px; font-weight:600; padding:9px 18px; border:none;
+  border-radius:9px; cursor:pointer; }
+#copybtn{ background:var(--hot); color:#fff; }
+#sendbtn{ background:var(--green); color:#fff; }
+.actions button:active{ transform:scale(.97); }
+.moonrow{ display:flex; gap:8px; align-items:center; margin-top:10px;
+  font-size:12.5px; color:var(--muted); flex-wrap:wrap; }
+.moonrow input{ font-size:13px; padding:6px 9px; border:1px solid #ded3c5;
+  border-radius:8px; width:230px; }
+#sendmsg{ font-size:12.5px; margin-top:6px; }
+#fallback{ display:none; width:100%; margin-top:10px; font-family:Consolas,monospace;
+  font-size:13px; padding:8px; border:1px solid #ded3c5; border-radius:8px; }
+.faq h3{ font-size:13.5px; margin:14px 0 4px; }
+.faq p{ margin:0; font-size:13px; color:var(--muted); }
+kbd{ background:#f6f0e8; border:1px solid var(--line); border-radius:5px;
+  padding:1px 6px; font-size:12px; font-family:Consolas,monospace; }
+</style></head><body>
+<div class="wrap">
+<header class="hero">
+  <h1>&#128293; TMC Flow Test &middot; Control Panel</h1>
+  <div class="sub">Beginner-friendly launcher for the Crydteam max-flow
+    plugin &middot; find your real max volumetric flow without test prints.</div>
+</header>
+
+<div class="card" id="setupcard">
+  <h2><span class="step">1</span>Before you start</h2>
+  <ul class="checks" id="checks"></ul>
+</div>
+
+<div class="card">
+  <h2><span class="step">2</span>What do you want to run?</h2>
+  <p class="lead">First time? Run the <b>status check</b> once, then the
+    <b>max flow test</b> — it finds your real limit in one go.</p>
+  <div class="testgrid" id="testgrid"></div>
+</div>
+
+<div class="card">
+  <h2><span class="step">3</span>Settings</h2>
+  <p class="lead" id="testdesc"></p>
+  <div class="presets" id="presets"></div>
+  <div class="fields" id="basicfields"></div>
+  <details id="advdetails"><summary>Advanced settings (safe to ignore)</summary>
+    <div class="fields" id="advfields"></div>
+  </details>
+  <div class="est" id="estimate"></div>
+</div>
+
+<div class="card">
+  <h2><span class="step">4</span>Run it</h2>
+  <div class="cmdbox" id="cmdbox"></div>
+  <div id="cmdwarn" style="display:none;color:var(--red);font-size:12.5px;
+    margin-top:8px;font-weight:600"></div>
+  <div class="actions">
+    <button id="copybtn" type="button">&#128203; Copy command</button>
+    <button id="sendbtn" type="button">&#9654; Send to printer</button>
+  </div>
+  <textarea id="fallback" rows="2" readonly></textarea>
+  <div class="moonrow">
+    <span>Moonraker URL:</span>
+    <input id="moonurl" type="text" />
+    <span>(sending needs your browser origin in Moonraker's
+      <kbd>cors_domains</kbd> — otherwise use Copy &amp; paste into the
+      console)</span>
+  </div>
+  <div id="sendmsg"></div>
+</div>
+
+<div class="card faq">
+  <h2>&#10067; Help</h2>
+  <h3>The hotend must be hot</h3>
+  <p>The test extrudes real filament. Heat the hotend to your printing
+     temperature (<kbd>M109 S250</kbd>) and load filament first — the plugin
+     refuses to run below its minimum temperature. Extrude over the purge
+     bucket or with the nozzle away from the bed.</p>
+  <h3>How does it detect the limit?</h3>
+  <p>It raises the flow step by step and watches the TMC StallGuard load
+     signal. When the extruder gear starts slipping or grinding, the signal
+     changes character (variance spikes, brief load collapses or unload
+     peaks) — that's the limit. Then it bisects to ±1 mm³/s and verifies.</p>
+  <h3>StallGuard reads 0 / nothing is detected</h3>
+  <p>StallGuard needs the right driver setup: SG2 drivers (TMC5160/2130/2240)
+     need <b>SpreadCycle</b> (no <kbd>stealthchop_threshold</kbd>), the
+     TMC2209 needs <b>StealthChop</b>. All need
+     <kbd>coolstep_threshold</kbd> set and a sensible <kbd>driver_SGT</kbd>.
+     Run the status check — it names the exact problem. For SGT use the
+     <b>SGT calibration</b> and then <kbd>SAVE_CONFIG</kbd>.</p>
+  <h3>Starting at a high flow</h3>
+  <p>Safe: two fixed low reference steps run first and give the detection a
+     clean baseline. Set <kbd>REF_FLOW=0</kbd> only if you know why.</p>
+  <h3>Where are my results?</h3>
+  <p>Every run writes a CSV and an interactive HTML report into the Flowtest
+     folder inside your config directory. Open the HTML in a browser — it
+     shows the curve, the decision trail and the recommended slicer value.</p>
+</div>
+
+<div style="text-align:center;color:var(--muted);font-size:12px">
+  Plugin by Steven (Fragmon) — Crydteam &middot; regenerate this page any time
+  with <kbd>TMC_FLOW_GUI</kbd></div>
+</div>
+
+<script>
+const CFG = /*CFG*/null;
+
+// F(name, label, default, hint, advanced, options)
+// options: array of [value,label] renders a dropdown instead of a text box.
+const F = (n,l,d,h,adv,opts) => ({n,l,d,h,adv:!!adv,opts:opts||null});
+const YESNO = [['1','yes'],['0','no']];
+
+const TESTS = {
+  FLOW: {
+    cmd:'TMC_FLOW_FIND_MAX', name:'Max flow test', rec:true,
+    blurb:'Find the real max volumetric flow (mm³/s)',
+    desc:'Raises the flow step by step, watches the StallGuard load signal '
+        +'for the onset of extruder slip, then bisects to ±1 mm³/s and '
+        +'verifies the result. Writes a CSV + interactive HTML report.',
+    fields:[
+      F('START','Start flow (mm³/s)','10','Where the sweep begins — pick clearly below your expected limit'),
+      F('MAX','Stop at (mm³/s)','80','Safety ceiling: the test never goes above this'),
+      F('COARSE_STEP','Step size (mm³/s)','10','Smaller = finer but slower. 5 is a good compromise'),
+      F('DURATION','Seconds per measurement','5','How long each flow is held. Longer = calmer signal'),
+      F('FAN_SPEED','Part-cooling fan (%)','','Locked during the test. Empty = value from your config'),
+      F('REPEAT','Repeats per step','5','',1),
+      F('VERIFY_REPEATS','Verification repeats','5','',1),
+      F('MIN_STEP','Final precision (mm³/s)','1','How close the bisection gets to the true limit',1),
+      F('REF_FLOW','Reference flow (mm³/s)','','Two slip-free reference steps before the sweep. Empty = config, 0 = off',1),
+      F('COOLDOWN','Cool-down between phases (s)','15','',1),
+      F('MAX_BISECT_STEPS','Max bisection steps','6','',1),
+      F('PURGE','Purge before start (mm)','0','Filament purged once before the test',1),
+      F('AUTO_SGT','Auto-tune SGT first','1','Calibrates StallGuard sensitivity before the test',1,YESNO),
+      F('SAVE_SGT','Save tuned SGT to config','0','Keeps the tuned SGT and stages it for SAVE_CONFIG',1,YESNO),
+      F('KEEP_SGT','Keep tuned SGT (session)','0','Keep it active until the next restart, without saving',1,YESNO),
+      F('COLD_EXTRUSION_HINT','Cold-extrusion hint (mm³/s)','0','Marks a flow you observed as under-extruding — report only',1),
+      F('SKIP_TMC_CHECK','Skip the TMC config check','0','',1,YESNO),
+      F('NO_HTML','Skip the HTML report','0','',1,YESNO),
+    ],
+    presets:{
+      'V6 / Revo 0.4':{START:'5',MAX:'25',COARSE_STEP:'5'},
+      'Volcano / CHT 0.4':{START:'10',MAX:'40',COARSE_STEP:'5'},
+      'Rapido HF 0.4':{START:'10',MAX:'60',COARSE_STEP:'5'},
+      'Rapido 0.6 / Magnum':{START:'15',MAX:'80',COARSE_STEP:'5'},
+      'Goliath / CHT 0.8':{START:'25',MAX:'120',COARSE_STEP:'5'},
+      'Unknown — discover':{START:'10',MAX:'150',COARSE_STEP:'5'},
+    }},
+  SGT: {
+    cmd:'TMC_FLOW_SGT_CALIBRATE', name:'SGT calibration',
+    blurb:'Tune StallGuard sensitivity and save it permanently',
+    desc:'Probes at a low, safe flow and raises/lowers the driver’s SGT '
+        +'until the StallGuard signal has proper dynamic range. With SAVE=1 '
+        +'the value is staged for SAVE_CONFIG, so it survives restarts. '
+        +'SG2 drivers only (TMC5160/2130/2240). Hotend must be hot.',
+    fields:[
+      F('FLOW','Probe flow (mm³/s)','','Empty = your reference_flow config value (15)'),
+      F('SAVE','Save to printer.cfg','1','1 = stage for SAVE_CONFIG, 0 = only until restart',0,YESNO),
+    ],
+    presets:{'Standard':{}}},
+  STATUS: {
+    cmd:'TMC_FLOW_STATUS', name:'Status check',
+    blurb:'Verify driver + StallGuard — run this first',
+    desc:'Reads the live StallGuard value and checks the driver '
+        +'configuration (chopper mode, thresholds, CoolStep). Names the '
+        +'exact problem if something would break the test. Always safe.',
+    fields:[
+      F('ACTIVATE','Extrude 1 mm to read SG','1','StallGuard only reads while the motor turns',0,YESNO),
+    ],
+    presets:{'Standard':{}}},
+  VARIANTS: {
+    cmd:'TMC_FLOW_TEST_SG_VARIANTS', name:'TMC2209 pre-flight',
+    blurb:'TMC2209 only: which chopper mode gives a usable signal',
+    desc:'Runs the same probe in StealthChop and in SpreadCycle and tells '
+        +'you empirically which mode produces a usable StallGuard signal on '
+        +'your hardware. Only needed for the TMC2209.',
+    fields:[
+      F('LOW_FLOW','Low probe flow (mm³/s)','5','Light load reference (1-30)'),
+      F('HIGH_FLOW','High probe flow (mm³/s)','20','Near/above your expected slip point (5-150)'),
+      F('DURATION','Seconds per probe','5','2-15',1),
+      F('REPEAT','Repeats per probe','5','3-10',1),
+      F('SGTHRS','Temporary SGTHRS','100','Restored afterwards (0-255)',1),
+    ],
+    presets:{'Standard':{}, 'High-flow hotend':{LOW_FLOW:'30',HIGH_FLOW:'140',DURATION:'8'}}},
+};
+
+let sel='FLOW', presetSel=null, values={};
+
+function el(id){ return document.getElementById(id); }
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+  .replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function defaults(t){ const o={}; TESTS[t].fields.forEach(f=>o[f.n]=f.d); return o; }
+function num(v,fb){ const x=parseFloat(v); return isFinite(x)?x:fb; }
+
+function renderChecks(){
+  const ul=el('checks'); const li=[];
+  if(!CFG){
+    li.push('<li class="warn">&#9888; No live printer data — run '
+      +'<kbd>TMC_FLOW_GUI</kbd> on the printer to regenerate this page '
+      +'with your current config baked in.</li>');
+  } else {
+    if(CFG.driver){
+      li.push('<li><span class="ok">&#10003;</span> Driver: <b>'+esc(CFG.driver)
+        +'</b> on <b>'+esc(CFG.stepper)+'</b>'
+        +(CFG.sgt!==null&&CFG.sgt!==undefined?', SGT <b>'+esc(CFG.sgt)+'</b>':'')
+        +'</li>');
+    } else {
+      li.push('<li><span class="warn">&#9888;</span> No TMC driver with '
+        +'StallGuard found for <b>'+esc(CFG.stepper)+'</b> — this plugin '
+        +'needs a TMC2130/2209/2240/5160/2660.</li>');
+    }
+    (CFG.problems||[]).forEach(p=>{
+      li.push('<li><span class="warn">&#9888;</span> '+esc(p)+'</li>');
+    });
+    if(CFG.driver && !(CFG.problems||[]).length){
+      li.push('<li><span class="ok">&#10003;</span> Driver configuration '
+        +'looks good for StallGuard.</li>');
+    }
+    li.push('<li><span class="ok">&#10003;</span> Filament <b>'
+      +esc(CFG.filament_diameter)+' mm</b>, melt zone <b>'
+      +esc(CFG.melt_zone_length)+' mm</b>, min hotend temp <b>'
+      +esc(CFG.min_hotend_temp)+' &deg;C</b></li>');
+    if(CFG.hotend_temp!==null&&CFG.hotend_temp!==undefined){
+      const hot=CFG.hotend_temp>=CFG.min_hotend_temp;
+      li.push('<li><span class="'+(hot?'ok':'warn')+'">'+(hot?'&#10003;':'&#9888;')
+        +'</span> Hotend now: <b>'+esc(CFG.hotend_temp)+' &deg;C</b>'
+        +(hot?'':' — heat it to printing temperature before testing')+'</li>');
+    }
+    li.push('<li><span class="ok">&#10003;</span> Reports go to: <kbd>'
+      +esc(CFG.output_dir)+'</kbd></li>');
+    if(CFG.version) li.push('<li style="color:var(--muted);font-size:12.5px">'
+      +'Page generated by plugin v'+esc(CFG.version)
+      +' — re-run <kbd>TMC_FLOW_GUI</kbd> after a plugin update so new '
+      +'parameters appear here.</li>');
+  }
+  li.push('<li>&#128161; Load filament and extrude into free air / over the '
+    +'purge bucket — the test pushes a lot of material.</li>');
+  ul.innerHTML=li.join('');
+}
+
+function renderTests(){
+  el('testgrid').innerHTML=Object.keys(TESTS).map(k=>{
+    const t=TESTS[k];
+    let badge = t.rec?'<span class="badge">RECOMMENDED</span>':'';
+    if(k==='VARIANTS' && CFG && CFG.driver && CFG.driver!=='tmc2209')
+      badge='<span class="badge grey">NOT NEEDED</span>';
+    if(k==='SGT' && CFG && CFG.can_autotune_sgt===false)
+      badge='<span class="badge grey">UNSUPPORTED</span>';
+    return '<div class="testcard'+(k===sel?' sel':'')+'" data-k="'+k+'">'
+      +'<b>'+t.name+badge+'</b><span>'+t.blurb+'</span></div>';
+  }).join('');
+  document.querySelectorAll('.testcard').forEach(c=>c.onclick=()=>{
+    sel=c.dataset.k; presetSel=null; values=defaults(sel);
+    unlatch(); el('sendmsg').textContent='';
+    renderAll();
+  });
+}
+
+function renderPresets(){
+  const t=TESTS[sel]; const keys=Object.keys(t.presets);
+  el('presets').innerHTML=keys.map(p=>
+    '<button type="button" class="'+(p===presetSel?'sel':'')+'" data-p="'
+    +esc(p)+'">'+esc(p)+'</button>').join('');
+  document.querySelectorAll('#presets button').forEach(b=>b.onclick=()=>{
+    presetSel=b.dataset.p;
+    // Merge into the current values instead of rebuilding from defaults:
+    // a preset only owns the fields it names, so manual edits to other
+    // fields survive a preset click.
+    values=Object.assign({}, values, t.presets[presetSel]||{});
+    renderAll();
+  });
+}
+
+function fieldHtml(f){
+  const v=values[f.n]!==undefined?values[f.n]:f.d;
+  let input;
+  if(f.opts){
+    input='<select data-n="'+f.n+'">'+f.opts.map(o=>
+      '<option value="'+esc(o[0])+'"'+(String(v)===o[0]?' selected':'')+'>'
+      +esc(o[1])+'</option>').join('')+'</select>';
+  } else {
+    input='<input data-n="'+f.n+'" value="'+esc(v)+'" />';
+  }
+  return '<div class="field"><label>'+esc(f.l)+'</label>'+input
+    +(f.h?'<span class="hint">'+f.h+'</span>':'')+'</div>';
+}
+
+function renderFields(){
+  const t=TESTS[sel];
+  el('testdesc').textContent=t.desc;
+  el('basicfields').innerHTML=t.fields.filter(f=>!f.adv).map(fieldHtml).join('');
+  const adv=t.fields.filter(f=>f.adv);
+  el('advdetails').style.display=adv.length?'':'none';
+  el('advfields').innerHTML=adv.map(fieldHtml).join('');
+  // Scope the binding to the two field containers — a global
+  // '.field input' query would also capture unrelated inputs.
+  ['basicfields','advfields'].forEach(id=>{
+    el(id).querySelectorAll('input,select').forEach(i=>{
+      const h=()=>{ values[i.dataset.n]=i.value;
+        renderCmd(); renderEstimate(); };
+      i.oninput=h; i.onchange=h;
+    });
+  });
+}
+
+function renderEstimate(){
+  const box=el('estimate');
+  if(sel!=='FLOW'){ box.style.display='none'; return; }
+  const v=k=>num(values[k]!==undefined?values[k]:defaults('FLOW')[k],0);
+  const start=v('START'), max=v('MAX'), step=v('COARSE_STEP');
+  const dur=v('DURATION'), rep=v('REPEAT'), vrep=v('VERIFY_REPEATS');
+  const bis=v('MAX_BISECT_STEPS'), cool=v('COOLDOWN');
+  if(!(step>0) || !(max>start)){ box.style.display='none'; return; }
+  // The reference phase only runs when START is at least REF_FLOW+10
+  // (see the plugin: ref steps are REF_FLOW and REF_FLOW+5).
+  const refFlow = num(values.REF_FLOW,
+    (CFG && CFG.reference_flow!==undefined && CFG.reference_flow!==null)
+      ? CFG.reference_flow : 15);
+  const refSteps = (refFlow>0 && start>=refFlow+10) ? 2 : 0;
+  const coarse=Math.ceil((max-start)/step)+1;
+  const perStep=rep*(dur+0.6);              // move + pause per repeat
+  const secs=(coarse+refSteps)*perStep      // sweep (worst case: no trigger)
+    + bis*perStep + vrep*(dur+0.6) + cool*2 + 30;
+  box.style.display='';
+  box.innerHTML='&#9201; Rough estimate: <b>'+Math.round(secs/60)
+    +' min</b> worst case ('+coarse+' sweep steps'
+    +(refSteps?' + '+refSteps+' reference steps':'')
+    +'). It ends earlier as soon as slip is detected.'
+    +(start>25&&refSteps===0
+      ? ' <b>Note:</b> no reference steps run at this start flow, so the '
+        +'detection has no slip-free baseline for the first steps. Keep '
+        +'REF_FLOW at its default and start at least 10 mm³/s above it.'
+      : '');
+}
+
+// Klipper parses the argument string with shlex and then splits on '=' —
+// a space, quote, ';', '#' or '*' inside a value silently truncates the
+// command or throws "Malformed command". Decimal commas (de/fr locales)
+// break gcmd.get_float. Normalise what we safely can, flag the rest.
+function clean(v){ return v.trim().replace(/\s+/g,'').replace(',', '.'); }
+function badValue(cmd){
+  if(/[;#*'"]/.test(cmd))
+    return 'A value contains one of ; # * \' " — Klipper would cut the '
+      + 'command short there. Please remove it.';
+  return null;
+}
+
+function renderCmd(){
+  const t=TESTS[sel]; let cmd=t.cmd; const defs=defaults(sel);
+  t.fields.forEach(f=>{
+    const raw=(values[f.n]!==undefined?values[f.n]:f.d);
+    const v=clean(raw===null||raw===undefined?'':String(raw));
+    if(v!=='' && v!==String(defs[f.n])) cmd+=' '+f.n+'='+v;
+  });
+  el('cmdbox').textContent=cmd;
+  const warn=badValue(cmd);
+  el('cmdwarn').textContent=warn||'';
+  el('cmdwarn').style.display=warn?'':'none';
+  return cmd;
+}
+
+function renderAll(){ renderTests(); renderPresets(); renderFields();
+  renderCmd(); renderEstimate(); }
+
+function showFallback(cmd){
+  const ta=el('fallback');
+  ta.style.display='block'; ta.value=cmd; ta.focus(); ta.select();
+}
+
+el('copybtn').onclick=()=>{
+  const cmd=renderCmd();
+  const done=()=>{ el('copybtn').textContent='✓ Copied — paste into the console';
+    setTimeout(()=>el('copybtn').innerHTML='&#128203; Copy command',2200); };
+  // navigator.clipboard is unavailable on plain-http origins — fall back
+  // to a selectable textarea instead of throwing.
+  if(navigator.clipboard && window.isSecureContext){
+    navigator.clipboard.writeText(cmd).then(done).catch(()=>showFallback(cmd));
+  } else {
+    showFallback(cmd);
+    el('copybtn').textContent='Select the text below and copy it';
+    setTimeout(()=>el('copybtn').innerHTML='&#128203; Copy command',2600);
+  }
+};
+
+// Moonraker's /printer/gcode/script does NOT return until the G-code has
+// finished — a flow test runs for many minutes, so the response always
+// times out or is blocked by CORS. Neither outcome means "not started".
+// The button therefore latches for the LONG tests: pressing it again
+// would queue a SECOND run on top of the first. Short diagnostics
+// (status, SGT) unlock again as soon as they answer, and switching test
+// cards always unlocks — otherwise the page's own advice ("run the
+// status check first, then the flow test") would need a page reload.
+let sent=false;
+function unlatch(){
+  sent=false;
+  el('sendbtn').disabled=false;
+  el('sendbtn').style.opacity=1;
+}
+el('sendbtn').onclick=()=>{
+  if(sent) return;
+  const longRun=(sel==='FLOW'||sel==='VARIANTS');
+  const url=el('moonurl').value.replace(/\/+$/,'');
+  const msg=el('sendmsg');
+  const cmd=renderCmd();
+  const bad=badValue(cmd);
+  if(bad){ msg.textContent='✗ '+bad; msg.style.color='var(--red)'; return; }
+  sent=true;
+  el('sendbtn').disabled=true;
+  el('sendbtn').style.opacity=.55;
+  msg.innerHTML=longRun
+    ? '&#9654; Dispatched — <b>watch the printer console</b>. The reply '
+      +'only arrives when the whole test is finished, so a timeout here '
+      +'is normal. Do not press again: that would start a second run.'
+    : '&#9654; Sending…';
+  msg.style.color='var(--muted)';
+  fetch(url+'/printer/gcode/script?script='+encodeURIComponent(cmd),
+        {method:'POST'})
+    .then(r=>{ if(r.ok){
+        msg.textContent='✓ Finished (Moonraker confirmed the command).';
+        msg.style.color='var(--green)';
+      } else {
+        msg.textContent='⚠ Moonraker answered HTTP '+r.status
+          +' — if the console shows no test, use Copy & paste instead.';
+        msg.style.color='var(--amber)';
+      }
+      unlatch(); })
+    .catch(()=>{ msg.innerHTML=longRun
+        ? '&#9654; Dispatched — no confirmation received (normal for long '
+          +'runs, or the origin is missing in Moonraker '
+          +'<kbd>cors_domains</kbd>). <b>Check the console:</b> if nothing '
+          +'is running, use Copy &amp; paste.'
+        : '✗ No answer from Moonraker — check the URL, or add this page’s '
+          +'origin to <kbd>cors_domains</kbd>. Copy &amp; paste always works.';
+      msg.style.color=longRun?'var(--muted)':'var(--red)';
+      // Short commands are safe to retry; a long run may well be going.
+      if(!longRun) unlatch(); });
+};
+
+el('moonurl').value='http://'+(location.hostname||'mainsail.local')+':7125';
+values=defaults(sel);
+renderChecks(); renderAll();
+</script>
+</body></html>

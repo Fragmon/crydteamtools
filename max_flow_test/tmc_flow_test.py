@@ -471,7 +471,11 @@ class TMCFlowTest:
         if not os.path.isdir(config_dir):
             config_dir = os.path.expanduser('~')
         default_dir = os.path.join(config_dir, 'Flowtest')
-        self.output_dir = config.get('output_dir', default_dir)
+        # expanduser: the settings template documents a '~/...' path, and
+        # without this a user-supplied value would create a literal '~'
+        # directory next to klippy instead of writing into the home dir.
+        self.output_dir = os.path.expanduser(
+            config.get('output_dir', default_dir))
 
         self.filament_area = math.pi * (self.filament_diameter / 2.0) ** 2
 
@@ -504,6 +508,10 @@ class TMCFlowTest:
         self.gcode.register_command(
             'TMC_FLOW_STATUS', self.cmd_TMC_FLOW_STATUS,
             desc='Show current TMC StallGuard diagnostic values')
+        self.gcode.register_command(
+            'TMC_FLOW_GUI', self.cmd_TMC_FLOW_GUI,
+            desc='Write the beginner-friendly control panel (HTML) with '
+                 'live driver/config values into the output directory')
         self.gcode.register_command(
             'TMC_FLOW_SGT_CALIBRATE', self.cmd_TMC_FLOW_SGT_CALIBRATE,
             desc='Auto-tune the StallGuard SGT threshold at a low '
@@ -5042,6 +5050,126 @@ new Chart(document.getElementById('cvChart'), {
                     "Auto-SGT: WARNING failed to restore original "
                     "SGT=%d. Run FIRMWARE_RESTART to reset."
                     % original_sgt)
+
+    def cmd_TMC_FLOW_GUI(self, gcmd):
+        """Write the interactive control panel (tmc_flow_gui.html) into
+        the output directory, with the live config baked in.
+
+        Everything here must survive a cold printer and a missing /
+        unsupported driver — the whole point of the page is to TELL the
+        user what is wrong, so it must never fail to be written.
+        """
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                           'tmc_flow_gui.html')
+        if not os.path.isfile(src):
+            raise gcmd.error(
+                "tmc_flow_test: GUI template not found at %s — pull the "
+                "latest crydteamtools repo." % src)
+        try:
+            with open(src, encoding='utf-8') as f:
+                html = f.read()
+        except Exception as e:
+            # Anything that is not a gcode.error would put Klipper into
+            # shutdown ("Internal error on command"), so convert it.
+            raise gcmd.error(
+                "tmc_flow_test: cannot read the GUI template %s: %s"
+                % (src, e))
+        if '/*CFG*/null' not in html:
+            # A silent no-op replace would ship a page claiming "no live
+            # printer data" while this command reports success.
+            raise gcmd.error(
+                "tmc_flow_test: GUI template at %s has no /*CFG*/null "
+                "placeholder — the file was modified or reformatted." % src)
+
+        # Driver lookup is best-effort: _lookup_tmc raises when no
+        # StallGuard-capable driver is present, which the page reports.
+        try:
+            self._lookup_tmc()
+        except Exception:
+            pass
+
+        def field(name):
+            if self.tmc is None:
+                return None
+            try:
+                return self.tmc.fields.get_field(name)
+            except (KeyError, AttributeError):
+                return None
+
+        problems = []
+        try:
+            probs, _infos = self._check_tmc_config()
+            for fname, val, desc in probs:
+                # First line of the description is the human summary.
+                headline = str(desc).split('\n')[0]
+                problems.append("%s (%s = %s)" % (headline, fname, val))
+        except Exception as e:
+            logging.debug("tmc_flow_test: GUI config check failed: %s", e)
+
+        hotend_temp = None
+        try:
+            extruder = self.printer.lookup_object('extruder', None)
+            if extruder is not None:
+                hotend_temp = round(
+                    extruder.get_heater().get_temp(
+                        self.reactor.monotonic())[0], 1)
+        except Exception:
+            pass
+
+        cfg = {
+            'version': MODULE_VERSION,
+            'driver': self.driver_type,
+            'stepper': self.stepper_name,
+            # Driver-derived values are only meaningful once the lookup
+            # succeeded — before that the class defaults would report a
+            # plausible but wrong threshold field.
+            'sgt': (field(self._get_sg_threshold_field_name())
+                    if self.tmc is not None else None),
+            'can_autotune_sgt': bool(self._can_autotune_sgt()),
+            'problems': problems,
+            'filament_diameter': self.filament_diameter,
+            'melt_zone_length': self.melt_zone_length,
+            'min_hotend_temp': self.min_hotend_temp,
+            'reference_flow': self.reference_flow,
+            'test_fan_speed': self.test_fan_speed,
+            'hotend_temp': hotend_temp,
+            'output_dir': self.output_dir,
+        }
+        # json.dumps escapes for a JS string, not for HTML: a value
+        # containing "</script>" would end the script block.
+        cfg_json = json.dumps(cfg).replace('</', '<\\/')
+        html = html.replace('/*CFG*/null', cfg_json)
+
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+        except Exception as e:
+            raise gcmd.error(
+                "tmc_flow_test: cannot create output dir %s: %s"
+                % (self.output_dir, e))
+        dst = os.path.join(self.output_dir, 'tmc_flow_gui.html')
+        # Write via a temp file so an interrupted write can't leave a
+        # half-written control panel behind. os.makedirs succeeds on an
+        # existing but unwritable directory, so the real permission /
+        # ENOSPC / read-only-remount failures surface HERE — and an
+        # uncaught OSError would shut the printer down.
+        tmp = dst + '.tmp'
+        try:
+            with open(tmp, 'w', encoding='utf-8') as f:
+                f.write(html)
+            os.replace(tmp, dst)
+        except Exception as e:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+            raise gcmd.error(
+                "tmc_flow_test: cannot write the control panel to %s: %s"
+                % (dst, e))
+        gcmd.respond_info(
+            "Control panel written to:\n  %s\n"
+            "Open it via your web UI's file browser (Flowtest folder) or "
+            "any browser. Re-run TMC_FLOW_GUI after config or driver "
+            "changes to refresh the baked-in values." % dst)
 
     def cmd_TMC_FLOW_SGT_CALIBRATE(self, gcmd):
         """Standalone SGT tuning with persistence.
