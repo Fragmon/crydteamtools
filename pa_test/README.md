@@ -26,6 +26,14 @@ bisect to the optimum — at **multiple flow rates** — and emit a ready-made
 **adaptive pressure-advance table for OrcaSlicer** (PA vs. flow), which is
 what sub-3-minute Benchys at up to 120 mm³/s actually need.
 
+## Control panel (GUI)
+
+Run **`PA_TEST_GUI`** (or the `PT_GUI` macro) — it writes `pa_test_gui.html`
+into the PAtest folder: a live checklist (driver, hotend temperature, output
+path), presets for the flow gap, an estimate of runtime *and filament
+consumption*, plus an explanation of how to read the verdict. Open it from
+Mainsail/Fluidd's file browser in any browser.
+
 ## Current state: feasibility probe
 
 This prototype ships stage 0 — `PA_TEST_PROBE` steps the extrusion rate
@@ -65,7 +73,7 @@ Then uncomment `[pa_test]` in `pa_test_settings.cfg` and
 
 ## Roadmap
 
-1. ✅ Feasibility probe (`PA_TEST_PROBE`)
+1. ✅ Feasibility probe (`PA_TEST_PROBE`) + control panel (`PA_TEST_GUI`)
 2. Step-response scoring per PA candidate (real XY moves with speed
    jumps over a purge line, so PA is actually active)
 3. PA bisection per flow rate + smooth-time tuning

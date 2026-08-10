@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PA Test — Control Panel</title>
+<style>
+:root{ --bg:#f2f0fa; --card:#fff; --ink:#211d2b; --muted:#6f6880;
+  --pa:#6d28d9; --pa2:#8b5cf6; --green:#2e9e5b; --amber:#b8860b;
+  --red:#b3261e; --line:#e8e3f5; }
+*{ box-sizing:border-box; }
+body{ font-family:'Segoe UI',system-ui,sans-serif; background:var(--bg);
+  color:var(--ink); margin:0; padding:0 16px 60px; line-height:1.55; }
+.wrap{ max-width:920px; margin:0 auto; }
+header.hero{ background:linear-gradient(135deg,#5b21b6,#a78bfa); color:#fff;
+  border-radius:0 0 18px 18px; padding:24px 26px 20px; margin:0 -16px 22px;
+  box-shadow:0 8px 22px rgba(91,33,182,.28); }
+header.hero h1{ margin:0; font-size:22px; }
+header.hero .sub{ margin-top:6px; font-size:13px; opacity:.94; }
+.card{ background:var(--card); border-radius:14px; padding:18px 20px;
+  margin-bottom:18px; box-shadow:0 2px 12px rgba(50,30,90,.07);
+  border:1px solid var(--line); }
+.card h2{ margin:0 0 6px; font-size:16px; color:var(--pa); }
+.card .lead{ margin:0 0 12px; color:var(--muted); font-size:13.5px; }
+.step{ display:inline-block; background:var(--pa); color:#fff;
+  border-radius:50%; width:22px; height:22px; text-align:center;
+  line-height:22px; font-size:13px; font-weight:700; margin-right:8px; }
+.checks li{ margin:6px 0; font-size:14px; }
+.ok{ color:var(--green); font-weight:600; }
+.warn{ color:var(--red); font-weight:600; }
+.proto{ background:#fdf6e3; border:1px solid #f0dfa8; border-radius:10px;
+  padding:11px 14px; font-size:13px; color:#7a5c12; margin-bottom:16px; }
+.presets{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
+.presets button{ font-size:13px; padding:7px 14px; border:1.5px solid var(--line);
+  border-radius:20px; background:#fbfaff; cursor:pointer; }
+.presets button.sel{ border-color:var(--pa2); background:#f6f2ff;
+  color:var(--pa); font-weight:600; }
+.fields{ display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr));
+  gap:12px 16px; }
+.field label{ display:block; font-weight:600; font-size:13px; margin-bottom:3px; }
+.field input{ width:100%; font-size:14px; padding:7px 10px;
+  border:1px solid #d6cfe6; border-radius:8px; background:#fbfaff; }
+.field .hint{ display:block; margin-top:3px; color:var(--muted); font-size:11.5px; }
+.est{ margin-top:12px; font-size:13px; background:#f6f2ff; border:1px solid #ddd2f6;
+  border-radius:9px; padding:9px 12px; color:#4c1d95; }
+.cmdbox{ background:#181425; color:#e4dcf6; border-radius:10px; padding:14px 16px;
+  font-family:Consolas,monospace; font-size:13px; word-break:break-all;
+  min-height:44px; }
+.actions{ display:flex; gap:10px; margin-top:12px; flex-wrap:wrap; }
+.actions button{ font-size:14px; font-weight:600; padding:9px 18px; border:none;
+  border-radius:9px; cursor:pointer; }
+#copybtn{ background:var(--pa); color:#fff; }
+#sendbtn{ background:var(--green); color:#fff; }
+.actions button:active{ transform:scale(.97); }
+.moonrow{ display:flex; gap:8px; align-items:center; margin-top:10px;
+  font-size:12.5px; color:var(--muted); flex-wrap:wrap; }
+.moonrow input{ font-size:13px; padding:6px 9px; border:1px solid #d6cfe6;
+  border-radius:8px; width:230px; }
+#sendmsg{ font-size:12.5px; margin-top:6px; }
+#fallback{ display:none; width:100%; margin-top:10px; font-family:Consolas,monospace;
+  font-size:13px; padding:8px; border:1px solid #d6cfe6; border-radius:8px; }
+.verdict{ border-left:3px solid var(--pa2); padding-left:12px; margin:10px 0;
+  font-size:13px; }
+.verdict b{ color:var(--pa); }
+.faq h3{ font-size:13.5px; margin:14px 0 4px; }
+.faq p{ margin:0; font-size:13px; color:var(--muted); }
+kbd{ background:#f2eefb; border:1px solid var(--line); border-radius:5px;
+  padding:1px 6px; font-size:12px; font-family:Consolas,monospace; }
+ol.steps{ margin:6px 0 0 18px; padding:0; font-size:13px; color:var(--muted); }
+ol.steps li{ margin:4px 0; }
+</style></head><body>
+<div class="wrap">
+<header class="hero">
+  <h1>&#128290; PA Test &middot; Control Panel</h1>
+  <div class="sub">Pressure-advance research via StallGuard &middot;
+    measures how fast melt pressure builds in your hotend.</div>
+</header>
+
+<div class="card" id="setupcard">
+  <h2><span class="step">1</span>Before you start</h2>
+  <ul class="checks" id="checks"></ul>
+</div>
+
+<div class="card">
+  <h2><span class="step">2</span>What this does</h2>
+  <div class="proto"><b>Prototype.</b> This plugin currently ships one
+    command — a <b>feasibility probe</b>. It does not calculate a
+    pressure-advance value yet; it measures whether your hardware's
+    StallGuard signal is clean enough to build the full PA search on.</div>
+  <p class="lead">Pressure advance compensates the melt pressure that builds
+    up in the nozzle. That pressure loads the extruder motor, and motor load
+    is what StallGuard measures. The probe steps the extrusion rate between
+    a low and a high flow (pure E-moves, no XY motion, PA not involved) and
+    records the load response at 50&nbsp;Hz.</p>
+  <ol class="steps">
+    <li>Heat the hotend to printing temperature and load filament.</li>
+    <li>Position the nozzle over the purge bucket / off the bed — this
+      extrudes several centimetres of filament.</li>
+    <li>Run the probe and read the verdict line in the console.</li>
+  </ol>
+</div>
+
+<div class="card">
+  <h2><span class="step">3</span>Settings</h2>
+  <p class="lead">The bigger the gap between low and high flow, the stronger
+    the signal. Pick a high flow you know your hotend handles — if you ran
+    the <kbd>TMC Flow Test</kbd>, use a value clearly below its result.</p>
+  <div class="presets" id="presets"></div>
+  <div class="fields" id="basicfields"></div>
+  <div class="est" id="estimate"></div>
+</div>
+
+<div class="card">
+  <h2><span class="step">4</span>Run it</h2>
+  <div class="cmdbox" id="cmdbox"></div>
+  <div id="cmdwarn" style="display:none;color:var(--red);font-size:12.5px;
+    margin-top:8px;font-weight:600"></div>
+  <div class="actions">
+    <button id="copybtn" type="button">&#128203; Copy command</button>
+    <button id="sendbtn" type="button">&#9654; Send to printer</button>
+  </div>
+  <textarea id="fallback" rows="2" readonly></textarea>
+  <div class="moonrow">
+    <span>Moonraker URL:</span>
+    <input id="moonurl" type="text" />
+    <span>(sending needs your browser origin in Moonraker's
+      <kbd>cors_domains</kbd> — otherwise use Copy &amp; paste into the
+      console)</span>
+  </div>
+  <div id="sendmsg"></div>
+</div>
+
+<div class="card">
+  <h2>&#128202; Reading the result</h2>
+  <p class="lead">The console prints a summary; the full time series lands
+    as a CSV in the output folder.</p>
+  <div class="verdict"><b>SG step</b> — how far the load signal moves
+    between low and high flow. Bigger is better.</div>
+  <div class="verdict"><b>SNR</b> — the step divided by the sample-to-sample
+    noise. <b>&ge;&nbsp;5 means the signal carries enough information</b> to
+    build the full PA search on. Below that, widen the flow gap and retry.</div>
+  <div class="verdict"><b>Rise time</b> — how long the pressure needs to
+    settle after a flow jump. This is the physical quantity pressure advance
+    compensates: a longer rise time means more PA.</div>
+  <div class="verdict"><b>Overshoot</b> — how far the load shoots past the
+    new steady level. Near zero is expected on a healthy extruder.</div>
+</div>
+
+<div class="card faq">
+  <h2>&#10067; Help</h2>
+  <h3>StallGuard reads 0 / the probe refuses to run</h3>
+  <p>Same driver requirements as the flow test: SG2 drivers
+     (TMC5160/2130/2240) need <b>SpreadCycle</b>, the TMC2209 needs
+     <b>StealthChop</b>, and both need <kbd>coolstep_threshold</kbd> plus a
+     sensible <kbd>driver_SGT</kbd>. Run <kbd>TMC_FLOW_STATUS</kbd> from the
+     flow-test plugin — it names the exact problem.</p>
+  <h3>Nothing extrudes / hotend too cold</h3>
+  <p>The probe refuses to run below the configured minimum temperature.
+     Heat with <kbd>M109 S250</kbd> (your printing temperature) first.</p>
+  <h3>What happens with the result?</h3>
+  <p>Send the CSV to the plugin author — the measured rise time and SNR
+     decide how the full PA search (per-flow bisection and an adaptive-PA
+     table for OrcaSlicer) will score candidates.</p>
+</div>
+
+<div style="text-align:center;color:var(--muted);font-size:12px">
+  Plugin by Steven (Fragmon) — Crydteam &middot; regenerate this page any time
+  with <kbd>PA_TEST_GUI</kbd></div>
+</div>
+
+<script>
+const CFG = /*CFG*/null;
+
+const F = (n,l,d,h) => ({n,l,d,h});
+const CMD = 'PA_TEST_PROBE';
+const FIELDS = [
+  F('FLOW_LOW','Low flow (mm³/s)','10','The relaxed baseline between jumps'),
+  F('FLOW_HIGH','High flow (mm³/s)','60','The loaded state — stay clearly below your max flow'),
+  F('DWELL','Seconds per segment','1.0','How long each flow is held before the next jump'),
+  F('CYCLES','Jump cycles','6','Each cycle is one up- and one down-jump. More = less noise'),
+];
+const PRESETS = {
+  'Standard':{FLOW_LOW:'10',FLOW_HIGH:'60',DWELL:'1.0',CYCLES:'6'},
+  'Gentle (low-flow hotend)':{FLOW_LOW:'5',FLOW_HIGH:'30',DWELL:'1.0',CYCLES:'8'},
+  'Wide gap (high-flow)':{FLOW_LOW:'20',FLOW_HIGH:'120',DWELL:'1.0',CYCLES:'6'},
+  'Precise (slow, quiet)':{FLOW_LOW:'10',FLOW_HIGH:'60',DWELL:'1.5',CYCLES:'12'},
+};
+
+let presetSel='Standard', values={};
+
+function el(id){ return document.getElementById(id); }
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+  .replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function defaults(){ const o={}; FIELDS.forEach(f=>o[f.n]=f.d); return o; }
+function num(v,fb){ const x=parseFloat(v); return isFinite(x)?x:fb; }
+// Klipper parses arguments with shlex: a space, quote, ';', '#' or '*'
+// truncates the command. A decimal comma breaks gcmd.get_float.
+function clean(v){ return String(v).trim().replace(/\s+/g,'').replace(',', '.'); }
+function badValue(cmd){
+  if(/[;#*'"]/.test(cmd))
+    return 'A value contains one of ; # * \' " — Klipper would cut the '
+      + 'command short there. Please remove it.';
+  // Klipper applies above=/minval= only to parameters that are actually
+  // PRESENT: an omitted FLOW_HIGH (because it equals the default) is
+  // returned unvalidated, so FLOW_LOW=60 with the default 60 would run
+  // a degenerate probe with a zero step instead of erroring. Check the
+  // relation here.
+  const v=k=>num(values[k]!==undefined?values[k]:defaults()[k], NaN);
+  if(!(v('FLOW_HIGH')>v('FLOW_LOW')))
+    return 'High flow must be greater than low flow — otherwise the probe '
+      + 'has no step to measure.';
+  if(!(v('DWELL')>=0.3)) return 'Seconds per segment must be at least 0.3.';
+  if(!(v('CYCLES')>=1)) return 'At least one jump cycle is required.';
+  return null;
+}
+
+function renderChecks(){
+  const ul=el('checks'); const li=[];
+  if(!CFG){
+    li.push('<li class="warn">&#9888; No live printer data — run '
+      +'<kbd>PA_TEST_GUI</kbd> on the printer to regenerate this page '
+      +'with your current config baked in.</li>');
+  } else {
+    if(CFG.driver){
+      li.push('<li><span class="ok">&#10003;</span> Driver: <b>'+esc(CFG.driver)
+        +'</b> on <b>'+esc(CFG.stepper)+'</b></li>');
+    } else {
+      li.push('<li><span class="warn">&#9888;</span> No StallGuard-capable '
+        +'TMC driver found for <b>'+esc(CFG.stepper)+'</b> — the probe '
+        +'cannot measure anything without one.</li>');
+    }
+    li.push('<li><span class="ok">&#10003;</span> Filament <b>'
+      +esc(CFG.filament_diameter)+' mm</b>, min hotend temp <b>'
+      +esc(CFG.min_hotend_temp)+' &deg;C</b></li>');
+    if(CFG.hotend_temp!==null&&CFG.hotend_temp!==undefined){
+      const hot=CFG.hotend_temp>=CFG.min_hotend_temp;
+      li.push('<li><span class="'+(hot?'ok':'warn')+'">'+(hot?'&#10003;':'&#9888;')
+        +'</span> Hotend now: <b>'+esc(CFG.hotend_temp)+' &deg;C</b>'
+        +(hot?'':' — heat it to printing temperature before probing')+'</li>');
+    }
+    li.push('<li><span class="ok">&#10003;</span> CSV goes to: <kbd>'
+      +esc(CFG.output_dir)+'</kbd></li>');
+    if(CFG.version) li.push('<li style="color:var(--muted);font-size:12.5px">'
+      +'Page generated by plugin v'+esc(CFG.version)
+      +' — re-run <kbd>PA_TEST_GUI</kbd> after a plugin update.</li>');
+  }
+  li.push('<li>&#128161; Load filament and extrude into free air / over the '
+    +'purge bucket.</li>');
+  ul.innerHTML=li.join('');
+}
+
+function renderPresets(){
+  el('presets').innerHTML=Object.keys(PRESETS).map(p=>
+    '<button type="button" class="'+(p===presetSel?'sel':'')+'" data-p="'
+    +esc(p)+'">'+esc(p)+'</button>').join('');
+  document.querySelectorAll('#presets button').forEach(b=>b.onclick=()=>{
+    presetSel=b.dataset.p;
+    values=Object.assign({}, values, PRESETS[presetSel]||{});
+    renderAll();
+  });
+}
+
+function fieldHtml(f){
+  const v=values[f.n]!==undefined?values[f.n]:f.d;
+  return '<div class="field"><label>'+esc(f.l)+'</label>'
+    +'<input data-n="'+f.n+'" value="'+esc(v)+'" />'
+    +(f.h?'<span class="hint">'+f.h+'</span>':'')+'</div>';
+}
+
+function renderFields(){
+  el('basicfields').innerHTML=FIELDS.map(fieldHtml).join('');
+  el('basicfields').querySelectorAll('input').forEach(i=>{
+    const h=()=>{ values[i.dataset.n]=i.value; renderCmd(); renderEstimate(); };
+    i.oninput=h; i.onchange=h;
+  });
+}
+
+function renderEstimate(){
+  const v=k=>num(values[k]!==undefined?values[k]:defaults()[k],0);
+  const lo=v('FLOW_LOW'), hi=v('FLOW_HIGH'), dw=v('DWELL'), cy=v('CYCLES');
+  const box=el('estimate');
+  if(!(dw>0)||!(cy>0)){ box.style.display='none'; return; }
+  // One lead-in segment plus two per cycle, each held for DWELL seconds.
+  const segs=1+2*cy;
+  const secs=segs*dw;
+  // Filament consumed: mm/s of filament = flow / area (1.75 mm => 2.405 mm²)
+  const area=(CFG&&CFG.filament_area)?CFG.filament_area:2.405;
+  const mm=(dw*lo)/area*(cy+1)+(dw*hi)/area*cy;
+  box.style.display='';
+  let html='&#9201; About <b>'+Math.round(secs)+' s</b> of extrusion ('
+    +segs+' segments) and roughly <b>'+Math.round(mm)+' mm</b> of filament.';
+  if(hi<=lo) html+=' <b>High flow must be greater than low flow.</b>';
+  else if(hi-lo<20) html+=' <b>Note:</b> a gap under 20 mm³/s often gives a '
+    +'weak signal — widen it if the verdict says the SNR is too low.';
+  box.innerHTML=html;
+}
+
+function renderCmd(){
+  let cmd=CMD; const defs=defaults();
+  FIELDS.forEach(f=>{
+    const v=clean(values[f.n]!==undefined?values[f.n]:f.d);
+    if(v!=='' && v!==String(defs[f.n])) cmd+=' '+f.n+'='+v;
+  });
+  el('cmdbox').textContent=cmd;
+  const warn=badValue(cmd);
+  el('cmdwarn').textContent=warn||'';
+  el('cmdwarn').style.display=warn?'':'none';
+  return cmd;
+}
+
+function renderAll(){ renderPresets(); renderFields(); renderCmd();
+  renderEstimate(); }
+
+function showFallback(cmd){
+  const ta=el('fallback');
+  ta.style.display='block'; ta.value=cmd; ta.focus(); ta.select();
+}
+
+el('copybtn').onclick=()=>{
+  const cmd=renderCmd();
+  const done=()=>{ el('copybtn').textContent='✓ Copied — paste into the console';
+    setTimeout(()=>el('copybtn').innerHTML='&#128203; Copy command',2200); };
+  // navigator.clipboard does not exist on plain-http origins.
+  if(navigator.clipboard && window.isSecureContext){
+    navigator.clipboard.writeText(cmd).then(done).catch(()=>showFallback(cmd));
+  } else {
+    showFallback(cmd);
+    el('copybtn').textContent='Select the text below and copy it';
+    setTimeout(()=>el('copybtn').innerHTML='&#128203; Copy command',2600);
+  }
+};
+
+// The probe is short (seconds), so Moonraker normally answers. Latch only
+// while the request is in flight so a double click can't queue a second
+// probe, then unlock again either way.
+let sending=false;
+function unlatch(){ sending=false; el('sendbtn').disabled=false;
+  el('sendbtn').style.opacity=1; }
+el('sendbtn').onclick=()=>{
+  if(sending) return;
+  const url=el('moonurl').value.replace(/\/+$/,'');
+  const msg=el('sendmsg');
+  const cmd=renderCmd();
+  const bad=badValue(cmd);
+  if(bad){ msg.textContent='✗ '+bad; msg.style.color='var(--red)'; return; }
+  sending=true; el('sendbtn').disabled=true; el('sendbtn').style.opacity=.55;
+  msg.textContent='▶ Sending — the reply arrives when the probe is done…';
+  msg.style.color='var(--muted)';
+  fetch(url+'/printer/gcode/script?script='+encodeURIComponent(cmd),
+        {method:'POST'})
+    .then(r=>{ if(r.ok){
+        msg.textContent='✓ Probe finished — read the verdict in the console.';
+        msg.style.color='var(--green)';
+      } else {
+        msg.textContent='⚠ Moonraker answered HTTP '+r.status
+          +' — if the console shows nothing, use Copy & paste instead.';
+        msg.style.color='var(--amber)';
+      }
+      unlatch(); })
+    .catch(()=>{ msg.innerHTML='⚠ No confirmation received — the probe may '
+      +'still be running, or this page’s origin is missing in Moonraker '
+      +'<kbd>cors_domains</kbd>. <b>Check the console before retrying.</b>';
+      msg.style.color='var(--amber)'; unlatch(); });
+};
+
+el('moonurl').value='http://'+(location.hostname||'mainsail.local')+':7125';
+values=Object.assign(defaults(), PRESETS[presetSel]);
+renderChecks(); renderAll();
+</script>
+</body></html>

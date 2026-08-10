@@ -19,6 +19,7 @@
 #
 # License: GPLv3
 
+import json
 import logging
 import math
 import os
@@ -68,6 +69,10 @@ class PATest:
             desc='Record the extruder SG step response to flow jumps '
                  '(feasibility probe for SG-based pressure-advance '
                  'calibration)')
+        self.gcode.register_command(
+            'PA_TEST_GUI', self.cmd_PA_TEST_GUI,
+            desc='Write the control panel (HTML) with live config values '
+                 'into the output directory')
 
     # ─── TMC lookup / SG reading (flow-test pattern) ────────────────
 
@@ -214,6 +219,84 @@ class PATest:
                 "pa_test: hotend at %.0f °C — heat it to printing "
                 "temperature first (min %.0f °C)."
                 % (temp, self.min_hotend_temp))
+
+    def cmd_PA_TEST_GUI(self, gcmd):
+        """Write the control panel (pa_test_gui.html) into the output
+        directory with the live config baked in. Must survive a cold
+        printer and a missing driver — the page's job is to report that.
+        """
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                           'pa_test_gui.html')
+        if not os.path.isfile(src):
+            raise gcmd.error(
+                "pa_test: GUI template not found at %s — pull the latest "
+                "crydteamtools repo." % src)
+        try:
+            with open(src, encoding='utf-8') as f:
+                html = f.read()
+        except Exception as e:
+            # A non-gcode.error would put Klipper into shutdown.
+            raise gcmd.error(
+                "pa_test: cannot read the GUI template %s: %s" % (src, e))
+        if '/*CFG*/null' not in html:
+            raise gcmd.error(
+                "pa_test: GUI template at %s has no /*CFG*/null "
+                "placeholder — the file was modified or reformatted." % src)
+
+        try:
+            self._lookup_tmc()
+        except Exception:
+            pass
+
+        hotend_temp = None
+        try:
+            extruder = self.printer.lookup_object('extruder', None)
+            if extruder is not None:
+                hotend_temp = round(
+                    extruder.get_heater().get_temp(
+                        self.reactor.monotonic())[0], 1)
+        except Exception:
+            pass
+
+        cfg = {
+            'version': MODULE_VERSION,
+            'driver': self.driver_type,
+            'stepper': self.stepper_name,
+            'filament_diameter': self.filament_diameter,
+            'filament_area': round(self.filament_area, 4),
+            'min_hotend_temp': self.min_hotend_temp,
+            'hotend_temp': hotend_temp,
+            'output_dir': self.output_dir,
+        }
+        # json.dumps escapes for a JS string, not for HTML: a value with
+        # "</script>" would end the script block.
+        html = html.replace('/*CFG*/null',
+                            json.dumps(cfg).replace('</', '<\\/'))
+
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+        except Exception as e:
+            raise gcmd.error(
+                "pa_test: cannot create output dir %s: %s"
+                % (self.output_dir, e))
+        dst = os.path.join(self.output_dir, 'pa_test_gui.html')
+        tmp = dst + '.tmp'
+        try:
+            with open(tmp, 'w', encoding='utf-8') as f:
+                f.write(html)
+            os.replace(tmp, dst)
+        except Exception as e:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+            raise gcmd.error(
+                "pa_test: cannot write the control panel to %s: %s"
+                % (dst, e))
+        gcmd.respond_info(
+            "Control panel written to:\n  %s\n"
+            "Open it via your web UI's file browser (PAtest folder) or any "
+            "browser. Re-run PA_TEST_GUI after config changes." % dst)
 
     def cmd_PA_TEST_PROBE(self, gcmd):
         flow_low = gcmd.get_float('FLOW_LOW', 10., above=0.)

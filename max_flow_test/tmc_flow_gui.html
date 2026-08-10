@@ -398,6 +398,19 @@ function badValue(cmd){
   if(/[;#*'"]/.test(cmd))
     return 'A value contains one of ; # * \' " — Klipper would cut the '
       + 'command short there. Please remove it.';
+  // Klipper applies above=/minval= only to parameters that are actually
+  // PRESENT. A field left at its default is omitted from the command and
+  // therefore returned unvalidated — e.g. START=100 with the default
+  // MAX=80 gives a sweep that can never run. Check the relations here.
+  const v=k=>num(values[k]!==undefined?values[k]:defaults(sel)[k], NaN);
+  if(sel==='FLOW'){
+    if(!(v('MAX')>v('START')))
+      return '"Stop at" must be greater than the start flow.';
+    if(!(v('MIN_STEP')<v('COARSE_STEP')))
+      return 'Final precision must be smaller than the step size.';
+  }
+  if(sel==='VARIANTS' && !(v('HIGH_FLOW')>v('LOW_FLOW')))
+    return 'The high probe flow must be greater than the low probe flow.';
   return null;
 }
 
