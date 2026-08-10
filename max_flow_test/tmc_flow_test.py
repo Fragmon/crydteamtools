@@ -633,7 +633,7 @@ class TMCFlowTest:
         tcoolthrs = get('tcoolthrs')
         semin = get('semin')
         en_pwm_mode = get('en_pwm_mode')
-        en_spread_cycle = get('en_spreadCycle')
+        en_spread_cycle = get('en_spreadcycle')
         sg_thrs_field = self._get_sg_threshold_field_name()
         sg_thrs_val = get(sg_thrs_field)
 
@@ -647,7 +647,7 @@ class TMCFlowTest:
             if en_spread_cycle is not None:
                 stealthchop_active = (en_spread_cycle == 0)
                 stealthchop_indicator = (
-                    'en_spreadCycle', en_spread_cycle, 'should be 0')
+                    'en_spreadcycle', en_spread_cycle, 'should be 0')
 
             if not stealthchop_active and stealthchop_indicator:
                 problems.append(
@@ -4792,7 +4792,7 @@ new Chart(document.getElementById('cvChart'), {
 
         # Chopper mode (decides which StallGuard engine works)
         add("en_pwm_mode (1=StealthChop)", 'en_pwm_mode')
-        add("en_spreadCycle (1=SpreadCycle, TMC2209)", 'en_spreadCycle')
+        add("en_spreadcycle (1=SpreadCycle, TMC2209)", 'en_spreadcycle')
 
         # Velocity gates that govern StallGuard / CoolStep activity
         add("TPWMTHRS (StealthChop velocity threshold)", 'tpwmthrs')

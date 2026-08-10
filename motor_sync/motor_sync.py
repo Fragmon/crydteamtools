@@ -68,7 +68,7 @@ class _TmcHandle:
         en_pwm = self.field('en_pwm_mode')       # 5160 / 2130 / 2240
         if en_pwm is not None:
             return 'StealthChop' if en_pwm else 'SpreadCycle'
-        en_spread = self.field('en_spreadCycle')  # 2209 / 2208
+        en_spread = self.field('en_spreadcycle')  # 2209 / 2208
         if en_spread is not None:
             return 'SpreadCycle' if en_spread else 'StealthChop'
         return '?'
@@ -338,7 +338,7 @@ class MotorSync:
                 # SG4 measures only in StealthChop; tpwmthrs=0 keeps
                 # StealthChop active at every speed. semin=0 disables
                 # CoolStep so current modulation can't distort SG.
-                wanted = (('en_spreadCycle', 0), ('tpwmthrs', 0),
+                wanted = (('en_spreadcycle', 0), ('tpwmthrs', 0),
                           ('semin', 0))
             elif h.sg2:
                 # TMC5160 / TMC2130 / TMC2240 / TMC2660: SG2 measures
