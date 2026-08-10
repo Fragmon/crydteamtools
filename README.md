@@ -50,6 +50,27 @@ Mainsail/Fluidd config editor, uncomment the section header
 (`[speed_test]` / `[tmc_flow_test]`), then run `FIRMWARE_RESTART`. Every
 option is documented in the file with its default value.
 
+Re-running the installer on an existing install asks whether you want to
+**update** (re-link the plugin files and add any missing `[include]` lines —
+your `*_settings.cfg` files are never overwritten), skip the installed ones,
+or abort.
+
+## Uninstalling
+
+```bash
+cd ~/crydteamtools
+./install.sh uninstall            # interactive selection
+./install.sh uninstall all        # or name plugins directly
+```
+
+This removes the plugin's symlinks from Klipper's `extras`, deletes its
+`[include]` lines from every config file, and — once no Crydteam plugin is
+left — removes the `[update_manager crydteamtools]` entry from
+`moonraker.conf`. Your settings files are **not deleted**: they are moved to
+`~/printer_data/config/archive/`. Afterwards remove the plugin's config
+section (e.g. `[speed_test]`) if you had added it to `printer.cfg`, then run
+`FIRMWARE_RESTART`.
+
 ## Updating
 
 The installer registers the repo with **Moonraker's update manager**, so new
