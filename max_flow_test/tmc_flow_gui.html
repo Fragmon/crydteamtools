@@ -478,8 +478,9 @@ el('sendbtn').onclick=()=>{
   el('sendbtn').style.opacity=.55;
   msg.innerHTML=longRun
     ? '&#9654; Dispatched — <b>watch the printer console</b>. The reply '
-      +'only arrives when the whole test is finished, so a timeout here '
-      +'is normal. Do not press again: that would start a second run.'
+      +'only arrives when the whole test is finished, so the button stays '
+      +'locked until then (pressing it again would start a second run). '
+      +'Switching test cards unlocks it too.'
     : '&#9654; Sending…';
   msg.style.color='var(--muted)';
   fetch(url+'/printer/gcode/script?script='+encodeURIComponent(cmd),
@@ -493,16 +494,30 @@ el('sendbtn').onclick=()=>{
         msg.style.color='var(--amber)';
       }
       unlatch(); })
-    .catch(()=>{ msg.innerHTML=longRun
-        ? '&#9654; Dispatched — no confirmation received (normal for long '
-          +'runs, or the origin is missing in Moonraker '
-          +'<kbd>cors_domains</kbd>). <b>Check the console:</b> if nothing '
-          +'is running, use Copy &amp; paste.'
-        : '✗ No answer from Moonraker — check the URL, or add this page’s '
-          +'origin to <kbd>cors_domains</kbd>. Copy &amp; paste always works.';
-      msg.style.color=longRun?'var(--muted)':'var(--red)';
-      // Short commands are safe to retry; a long run may well be going.
-      if(!longRun) unlatch(); });
+    .catch(()=>{
+      if(!longRun){
+        msg.innerHTML='✗ No answer from Moonraker — check the URL, or add '
+          +'this page’s origin to <kbd>cors_domains</kbd>. Copy &amp; paste '
+          +'always works.';
+        msg.style.color='var(--red)';
+        unlatch();
+        return;
+      }
+      // A long run may well be in progress, so keep the button locked —
+      // but offer an explicit way out, otherwise the only escape is
+      // switching test cards or reloading the page.
+      msg.innerHTML='&#9654; Dispatched — no confirmation received (normal '
+        +'for long runs, or the origin is missing in Moonraker '
+        +'<kbd>cors_domains</kbd>). <b>Check the console:</b> if nothing is '
+        +'running, use Copy &amp; paste. '
+        +'<a href="#" id="unlock" style="color:var(--hot);font-weight:600">'
+        +'Test finished or not started? Unlock the button</a>';
+      msg.style.color='var(--muted)';
+      const u=el('unlock');
+      if(u) u.onclick=(e)=>{ e.preventDefault(); unlatch();
+        msg.textContent='Button unlocked — only send again if no test is '
+          +'still running.'; msg.style.color='var(--muted)'; };
+    });
 };
 
 el('moonurl').value='http://'+(location.hostname||'mainsail.local')+':7125';
