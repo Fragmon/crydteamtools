@@ -4,6 +4,7 @@ The plugin samples StallGuard at 50 Hz during each measurement step (5 repeats �
 
 Slip detection uses **multiple independent triggers** that look for different signatures:
 
+- **Thermal runaway** (all drivers) — the only trigger that does not read StallGuard, and the only one that catches *continuous* grinding: when the hobbed gear chews into filament that no longer advances, the motor load stays high and steady, so medians, dips, peaks and CV all look normal. But melting a given flow absorbs a matching amount of power — if the material stops arriving, that heat sink disappears and the hotend overshoots its target even though the heater was maxed out one step earlier. Fires when the step runs ≥5 °C above target **and** ≥4 °C above the run's own earlier offset (so a hotend that simply runs warm doesn't trip it). Validated: eight clean historical runs peak at 0.7–4.9 °C, a real grinding run reached +17.9 °C.
 - **Collapse dips** (SG2 only) — samples below 25 % of the run median are brief stall events (stick-slip clicks). Median/IQR/CV absorb a handful of dips among hundreds of samples completely, so this is the primary trigger for audible click-stalls. Fires when the step's dip rate exceeds 1 % of samples (≥3 dips) and 3× the prior-step baseline. Logged as `sg_dips` / `sg_dip_rate_pct` in the CSV.
 - **Unload peaks** (SG2 only) — the extruder-grinding mirror image of the dip: when the drive gear grinds through the filament the motor is briefly *unloaded* and SG spikes above 145 % of the run median while the median stays smooth. Fires when the peak rate exceeds 0.6 % of samples (≥8 peaks) and 3× the prior-step baseline. Logged as `sg_peaks` / `sg_peak_rate_pct`.
 - **SG signal patterns** — snap-back, over-jump, single-step plateau, 2-step cumulative plateau (with saturation-skip and median-baseline)
@@ -11,7 +12,9 @@ Slip detection uses **multiple independent triggers** that look for different si
 - **Sample distribution** — IQR widening (single-step), IQR cumulative growth (vs early-test baseline), IQR vs coarse-baseline, IQR absolute floor
 - **Per-run analysis** — single-run outlier detection (warmup-aware), SG max spike for decoupling
 
-Trigger maturity: the dip and CV triggers are active from the 3rd step of the sweep; the distribution triggers (IQR, max-spike, outlier) need 5 steps of history because early steps often sit in the SG saturation region with spiky max/IQR.
+The per-step console line also flags **`heater at 100%`** when the heater duty averaged ≥95 % for a whole step: from that flow on, the *hotend* — not the motor — is the limit, and higher numbers are not sustainable in a real print even if no slip is detected.
+
+Trigger maturity: the thermal, dip and CV triggers are active from the 3rd step of the sweep; the distribution triggers (IQR, max-spike, outlier) need 5 steps of history because early steps often sit in the SG saturation region with spiky max/IQR.
 
 Each trigger fires under tighter conditions in **bisection / verify** than in coarse, so the coarse phase stays noise-resistant while the final result is accurate to ±1 mm³/s.
 

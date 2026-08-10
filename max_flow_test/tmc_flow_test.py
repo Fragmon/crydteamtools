@@ -50,7 +50,7 @@ TAIL_TRIM_FRACTION = 0.05     # drop last 5 % of each run: during the
                               # per run (CSV 2026-08-09_09-10-42)
 MIN_HOTEND_TEMP = 180.0
 MODULE_NAME = "TMC Flow Test"
-MODULE_VERSION = "1.2.1"
+MODULE_VERSION = "1.2.2"
 SG_MIN_INFORMATIVE = 50   # below this SG value, readings are noise
 
 
@@ -175,6 +175,22 @@ class TriggerProfile:
     PEAK_MIN_COUNT = 8              # min peaks in the step to consider
     PEAK_RATE_MIN = 0.006           # ≥ 0.6 % of the step's samples
     PEAK_BASE_RATIO = 3.0           # and ≥ 3× prior-step baseline rate
+
+    # ─── _check_thermal_runaway thresholds (all drivers) ───────────
+    # Continuous grinding keeps the motor load HIGH (the gear digs into
+    # stationary filament), so every SG trigger above can stay quiet.
+    # The give-away is thermal: the melt zone stops absorbing the
+    # commanded flow, so the hotend climbs above target even though the
+    # heater was struggling one step earlier.
+    # Validated against 8 real runs: clean ones peak at 0.7-4.9 °C above
+    # target, the grinding run reached 17.9 °C.
+    TEMP_RUNAWAY_ABS = 5.0          # °C above target, absolute floor
+    TEMP_RUNAWAY_JUMP = 4.0         # AND °C above the earlier steps'
+                                    # own offset (protects setups that
+                                    # simply run warm)
+    # Heater pinned at this duty for a whole step = the hotend is at its
+    # thermal limit; higher flows are not sustainable in a real print.
+    PWM_SATURATED = 0.95
 
     # ─── _check_run_outlier thresholds ─────────────────────────────
     OUTLIER_MAD_RATIO = 4.0         # deviation ≥ this × MAD
@@ -3476,6 +3492,13 @@ new Chart(document.getElementById('cvChart'), {
                 'warmup_dropped': warmup_dropped,
             }
 
+        # Aggregate thermal samples — only the ACTIVE extrusion ones
+        # define pwm_avg/max/min and the temp_drop. Recovery samples
+        # are kept for diagnostics (did the heater recover between reps?)
+        # Done before the summary line so it can report heater
+        # saturation.
+        thermal_agg = self._aggregate_thermal_samples(active_thermal_samples)
+
         # Compact summary line
         sg_med_str = "%.0f" % sg_stats['median'] if sg_stats else 'n/a'
         cv_str = ("%.1f%%" % run_consistency['sg_cv']
@@ -3485,15 +3508,15 @@ new Chart(document.getElementById('cvChart'), {
                    if dip_agg and dip_agg['count'] > 0 else '')
         if peak_agg and peak_agg['count'] > 0:
             dip_str += ' | peaks = %d' % peak_agg['count']
+        # Heater pinned = the hotend, not the motor, is now the limit.
+        pwm_avg = (thermal_agg or {}).get('pwm_avg')
+        if pwm_avg is not None and pwm_avg >= self.profile.PWM_SATURATED:
+            dip_str += ' | heater at 100%% (thermal limit reached)'
         gcmd.respond_info(
             "  %.1f mm³/s | SG median = %s | "
             "run-to-run CV = %s%s%s"
             % (target_flow, sg_med_str, cv_str, dip_str, warmup_str))
 
-        # Aggregate thermal samples — only the ACTIVE extrusion ones
-        # define pwm_avg/max/min and the temp_drop. Recovery samples
-        # are kept for diagnostics (did the heater recover between reps?)
-        thermal_agg = self._aggregate_thermal_samples(active_thermal_samples)
         # Augment with recovery diagnostics (mainly: did the heater
         # come back to target between reps?)
         if recovery_thermal_samples and thermal_agg:
@@ -3572,6 +3595,15 @@ new Chart(document.getElementById('cvChart'), {
         # trigger-blind — a stall on step 4 went unnoticed.
         if not results or len(results) < 3:
             return None
+
+        # Thermal trigger first: it is the only one that still works
+        # when the extruder grinds continuously (see the docstring
+        # there), and it must not be skipped by the SG-specific guards
+        # below.
+        thermal_reason = self._check_thermal_runaway(results)
+        if thermal_reason:
+            return thermal_reason
+
         r = results[-1]
         sg_stats = r['sg']
         if sg_stats is None or sg_stats['n'] == 0:
@@ -3815,6 +3847,53 @@ new Chart(document.getElementById('cvChart'), {
             return outlier_reason
 
         return None
+
+    def _check_thermal_runaway(self, results):
+        """Detect that the extruder stopped delivering the commanded flow.
+
+        Every trigger above reads the StallGuard signal. Continuous
+        grinding defeats all of them: the hobbed gear chews into
+        filament that no longer advances, which keeps the motor load
+        high and steady — medians stay smooth, no dips, no unload
+        peaks, CV unchanged.
+
+        What does change is heat. Melting X mm³/s absorbs a matching
+        amount of power; if the material stops arriving, that heat sink
+        disappears and the hotend overshoots its target even though the
+        heater was maxed out one step earlier. Validated on a TMC2240
+        run that ground at 80 mm³/s: +2 °C at 80, +7.5 at 90, +17.9 at
+        100, while eight clean historical runs never exceeded +4.9.
+
+        Both an absolute floor and a jump over the run's own baseline
+        must be cleared, so a hotend that simply runs a few degrees warm
+        does not trip it.
+        """
+        p = self.profile
+        th = (results[-1].get('thermal') or {})
+        target = th.get('temp_target')
+        avg = th.get('temp_avg')
+        if not target or avg is None or target <= 0:
+            return None
+        offset = avg - target
+        if offset < p.TEMP_RUNAWAY_ABS:
+            return None
+        prior = []
+        for r in results[:-1]:
+            t = r.get('thermal') or {}
+            if t.get('temp_target') and t.get('temp_avg') is not None:
+                prior.append(t['temp_avg'] - t['temp_target'])
+        if len(prior) < 2:
+            return None
+        s = sorted(prior)
+        n = len(s)
+        base = s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
+        if offset - base < p.TEMP_RUNAWAY_JUMP:
+            return None
+        return ("hotend ran %.1f °C above target (%.1f vs %.1f °C) while "
+                "the earlier steps held %+.1f °C — the melt zone is no "
+                "longer absorbing the commanded flow, so the extruder is "
+                "not delivering it (grinding)"
+                % (offset, avg, target, base))
 
     def _check_dip_collapse(self, results, sg_label):
         """Detect brief SG collapse dips — the stick-slip stall signature.
