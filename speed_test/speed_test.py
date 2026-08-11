@@ -193,6 +193,29 @@ class SpeedTest:
         v, a, scv = self._get_printer_limits()
         self._set_limits(velocity=v, accel=a, scv=scv)
 
+    def _apply_limits_checked(self, gcmd, velocity, accel):
+        """Set the motion limits and VERIFY they were accepted.
+
+        Some Klipper/Kalico builds clamp SET_VELOCITY_LIMIT to the
+        values from printer.cfg. When that happens the test silently
+        measures at the clamped acceleration while reporting the
+        requested one — every result would be wrong and nothing would
+        say so. Returns the acceleration actually in force.
+        """
+        self._set_limits(velocity=velocity, accel=accel)
+        _v, actual, _scv = self._current_limits()
+        if actual and abs(actual - accel) > max(1.0, accel * 0.01):
+            raise gcmd.error(
+                "speed_test: the printer did not accept ACCEL=%.0f — it "
+                "is running at %.0f mm/s². Your Klipper build clamps "
+                "SET_VELOCITY_LIMIT to the values in printer.cfg, so "
+                "every measurement above %.0f would be meaningless.\n"
+                "Raise 'max_accel' in the [printer] section (it is only "
+                "a ceiling; the tests set their own values) and "
+                "FIRMWARE_RESTART."
+                % (accel, actual, actual))
+        return actual or accel
+
     # ─── Homing & skip detection ──────────────────────────────────────
 
     def _ensure_homed(self, axes, testbench=False):
@@ -2780,7 +2803,9 @@ new Chart(document.getElementById('envChart'), {
                                              testbench),
                 testbench=testbench)
 
-        self._set_limits(velocity=velocity * 1.2, accel=accel)
+        # Fail fast: if the machine will not accept the starting value,
+        # say so before driving anything.
+        self._apply_limits_checked(gcmd, velocity * 1.2, accel)
         try:
             self._ensure_homed([axis], testbench=testbench)
             first = True
@@ -2800,7 +2825,9 @@ new Chart(document.getElementById('envChart'), {
                 def probe_once(a):
                     key = round(a, 1)
                     if key not in probed:
-                        self._set_limits(velocity=velocity * 1.2, accel=a)
+                        # Verified, not assumed: a clamped limit would
+                        # make every result a measurement of the clamp.
+                        self._apply_limits_checked(gcmd, velocity * 1.2, a)
                         probed[key] = probe(a)
                     return probed[key]
 
