@@ -681,6 +681,7 @@ class SpeedTest:
             sample_axes = tuple(axes)
 
         self._store_mcu_pos(sample_axes)
+        pos_before = dict(self._last_mcu_pos)
         if self.monitor_tmc:
             self._start_tmc_sampling(sample_axes)
         try:
@@ -696,6 +697,16 @@ class SpeedTest:
         failed = bool(skips)
         max_diff = max((d for _, d in skips), default=0)
         skip_axes = ",".join(a for a, _ in skips)
+        # On a failure, show the raw counters. A loss that equals the
+        # distance the axis happened to be parked at is a broken
+        # reference, not a stalled motor — without these numbers the
+        # two are indistinguishable.
+        pos_detail = ""
+        if failed:
+            pos_detail = " [" + " ".join(
+                "%s %d→%d" % (a, pos_before.get(a, 0),
+                              self._last_mcu_pos.get(a, 0))
+                for a, _ in skips) + "]"
 
         cruise_str = ""
         cf = getattr(self, '_last_cruise_fraction', None)
@@ -706,7 +717,8 @@ class SpeedTest:
         gcmd.respond_info(
             "  %s = %.1f  →  %s%s | accel=%.0f velo=%.0f scv=%.1f"
             % (label, value,
-               "FAILED (%d steps on %s)" % (max_diff, skip_axes)
+               "FAILED (%d steps on %s)%s" % (max_diff, skip_axes,
+                                                            pos_detail)
                if failed else "OK",
                cruise_str,
                a_cur, v_cur, scv_cur))
@@ -2796,20 +2808,39 @@ new Chart(document.getElementById('envChart'), {
                 % (accel_max, accel))
         temp_max = gcmd.get_float('TEMP_MAX', 70.0, above=temp)
         temp_step = gcmd.get_float('TEMP_STEP', 3.0, above=0.)
-        soak = gcmd.get_float('SOAK', 25.0, minval=0., maxval=600.)
+        # Heating: long enough to actually push the motor towards
+        # TEMP_MAX instead of stopping after a token warm-up.
+        soak = gcmd.get_float('SOAK', 120.0, minval=0., maxval=1800.)
+        soak_frac = gcmd.get_float('SOAK_FRAC', 0.7, above=0.1, below=1.0)
         step = gcmd.get_float('STEP', 0.05, above=0., below=0.5)
-        repeat = gcmd.get_int('REPEAT', 10, minval=2, maxval=100)
+        # Each probe is a randomised reversal-stress run, not a plain
+        # out-and-back: MOVES moves of which at least FULLSPEED_FRAC
+        # actually reach the target velocity.
+        moves = gcmd.get_int('MOVES', 100, minval=10, maxval=2000)
+        # 0.5 is the ceiling the move generator can guarantee: every
+        # full-speed sweep needs a reposition move, so more than half
+        # the moves cannot reach V. Asking for more is capped here
+        # rather than silently under-delivered.
+        fullspeed_frac = gcmd.get_float('FULLSPEED_FRAC', 0.5,
+                                        minval=0.0, maxval=0.5)
+        seed = gcmd.get_int('SEED', 12345)
+        repeat = gcmd.get_int('REPEAT', 0, minval=0, maxval=200)
         max_points = gcmd.get_int('MAX_POINTS', 20, minval=2, maxval=100)
 
         gcmd.respond_info(
-            "──── TORQUE FADE %s ────\n"
+            "──── TORQUE FADE %s (plugin v%s) ────\n"
             "  sensor: %s (now %.1f °C) → stop at %.0f °C\n"
             "  velocity %.0f mm/s | accel %.0f → never above %.0f mm/s² | "
-            "step %.0f%% | %d moves per probe\n"
+            "step %.0f%%\n"
+            "  probe: %s\n"
             "  The stress moves heat the motor themselves; between "
             "points it soaks up to %.0f s or until +%.1f K."
-            % (axis, source, temp, temp_max, velocity, accel, accel_max,
-               step * 100, repeat, soak, temp_step))
+            % (axis, MODULE_VERSION, source, temp, temp_max, velocity,
+               accel, accel_max, step * 100,
+               ("%d out-and-back moves" % repeat) if repeat else
+               ("%d randomised moves, at least %.0f %% of them reaching "
+                "%.0f mm/s" % (moves, fullspeed_frac * 100, velocity)),
+               soak, temp_step))
 
         results = []
         timestamp = time.strftime('%Y-%m-%d_%H-%M-%S')
@@ -2825,17 +2856,36 @@ new Chart(document.getElementById('envChart'), {
         }
 
         def probe(a):
+            if repeat:
+                # Legacy short probe, only when explicitly asked for.
+                pattern = lambda: self._do_jab_pattern(
+                    axis, velocity, a, repeat, testbench)
+            else:
+                # A randomised print-like run: short reversals mixed with
+                # long sweeps, with a guaranteed share of moves that
+                # really reach the target velocity. A handful of
+                # out-and-backs is far too easy — a motor can pass that
+                # and still lose steps in a real print.
+                targets = self._build_print_sim_moves(
+                    axis, velocity, a,
+                    n_infill=int(moves * 0.7), n_travel=max(1, moves // 10),
+                    seed=seed, fullspeed_frac=fullspeed_frac)
+                pattern = lambda: self._run_axis_moves(
+                    axis, targets, velocity, testbench)
             return self._measure_step(
-                gcmd, [axis], 'accel', a,
-                lambda: self._do_jab_pattern(axis, velocity, a, repeat,
-                                             testbench),
-                testbench=testbench)
+                gcmd, [axis], 'accel', a, pattern, testbench=testbench)
 
         # Fail fast: if the machine will not accept the starting value,
         # say so before driving anything.
         self._apply_limits_checked(gcmd, velocity * 1.2, accel)
         try:
             self._ensure_homed([axis], testbench=testbench)
+            # Guarantee the reference: _ensure_homed may have homed only
+            # what was missing, and the first measurement compares its
+            # baseline against a post-home position. If the axis is left
+            # anywhere else, that distance is reported as a step loss.
+            self.gcode.run_script_from_command("G28 " + axis)
+            self.gcode.run_script_from_command("M400")
             first = True
             stalled_rise = 0
             while len(results) < max_points:
@@ -2904,15 +2954,15 @@ new Chart(document.getElementById('envChart'), {
                     # Heat at a safe fraction of the limit. Soaking AT
                     # the limit would risk real step losses that nobody
                     # measures, poisoning the next point.
-                    soak_accel = limit * 0.7
+                    soak_accel = limit * soak_frac
                     self._set_limits(velocity=velocity * 1.2,
                                      accel=soak_accel)
                     gcmd.respond_info(
-                        "    heating at %.0f mm/s² (70 %% of the limit, "
+                        "    heating at %.0f mm/s² (%.0f %% of the limit, "
                         "so warming up cannot itself lose steps) until "
                         "+%.1f K or %.0f s — your UI will show this "
                         "acceleration, not the measured one."
-                        % (soak_accel, temp_step, soak))
+                        % (soak_accel, soak_frac * 100, temp_step, soak))
                     deadline = self.reactor.monotonic() + soak
                     while self.reactor.monotonic() < deadline:
                         self._do_jab_pattern(axis, velocity, soak_accel,

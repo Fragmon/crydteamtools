@@ -245,7 +245,12 @@ winding temperature, but it tracks it.
 | `ACCEL_MAX` | printer `max_accel` (or `ACCEL` if higher) | Hard ceiling for that climb — the test never drives the machine above it |
 | `TEMP_MAX` | 70 | Stop once the motor reaches this temperature (°C) |
 | `TEMP_STEP` | 3 | Target temperature rise (K) between measured points |
-| `SOAK` | 25 | Max seconds of heating moves between points |
+| `MOVES` | 100 | Randomised moves per probe. The old short out-and-back is only used when `REPEAT` is set |
+| `FULLSPEED_FRAC` | 0.5 | Minimum share of those moves that must actually reach `VELOCITY`. Capped at 0.5 — every full-speed sweep needs a reposition move, so more than half cannot reach V |
+| `SEED` | 12345 | Same seed → identical move sequence, so points are comparable |
+| `SOAK` | 120 | Max seconds of heating moves between points — long enough to actually approach `TEMP_MAX` |
+| `SOAK_FRAC` | 0.7 | Heating acceleration as a fraction of the current limit. Kept below 1 so warming up cannot itself lose steps |
+| `REPEAT` | 0 | Legacy short probe: N out-and-back moves instead of the randomised run |
 | `STEP` | 0.05 | Acceleration step size (5 %) |
 | `REPEAT` | 10 | Probe moves per measurement |
 | `MAX_POINTS` | 20 | Safety cap on the number of points |
