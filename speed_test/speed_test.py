@@ -2529,7 +2529,19 @@ new Chart(document.getElementById('envChart'), {
             % (axis, repeat, speed, accel, self.max_missed,
                int(self.max_missed * usteps)))
 
-        def home_and_read():
+        # Every homing cycle MUST start from the same physical spot.
+        # get_mcu_position() is a cumulative step counter, so a homing
+        # move changes it by however far the axis travelled — homing
+        # from a different position produces a different value that has
+        # nothing to do with endstop quality.
+        park = ax_min + 0.2 * ax_range
+
+        def home_and_read(pre=None):
+            self._move_to_axis(axis, park, speed)
+            if pre is not None:
+                pre()
+                self._move_to_axis(axis, park, speed)
+            self.gcode.run_script_from_command("M400")
             self._ensure_homed([axis], testbench=testbench)
             self.gcode.run_script_from_command("M400")
             return self._read_mcu_pos(axis)
@@ -2542,9 +2554,7 @@ new Chart(document.getElementById('envChart'), {
         def run_phase(label, between=None):
             positions = []
             for i in range(repeat):
-                if between is not None:
-                    between()
-                pos = home_and_read()
+                pos = home_and_read(between)
                 if pos is None:
                     raise gcmd.error(
                         "speed_test: cannot read the %s stepper MCU "
@@ -2563,12 +2573,12 @@ new Chart(document.getElementById('envChart'), {
         self._set_limits(velocity=speed, accel=accel)
         try:
             gcmd.respond_info(
-                "\n>>> Phase A: homing repeatability (no motion) <<<")
+                "\n>>> Phase A: homing repeatability (park → home) <<<")
             a = run_phase('home')
 
             gcmd.respond_info(
-                "\n>>> Phase B: with a gentle move (%.0f mm) <<<"
-                % min(ax_range, 100.0))
+                "\n>>> Phase B: same, plus a gentle %.0f mm sweep <<<"
+                % min(ax_range * 0.8, 100.0))
             span = min(ax_range * 0.8, 100.0)
             lo = max(ax_min, ax_mid - span / 2.0)
             hi = min(ax_max, lo + span)
