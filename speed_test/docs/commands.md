@@ -243,8 +243,8 @@ winding temperature, but it tracks it.
 | `VELOCITY` | printer `max_velocity` | Speed of the probe moves — use the speed you care about, e.g. the fastest point from your limit map |
 | `ACCEL` | printer `max_accel` | Starting acceleration. The first point climbs from here in `STEP` increments until it breaks, establishing the cold limit |
 | `ACCEL_MAX` | printer `max_accel` (or `ACCEL` if higher) | Hard ceiling for that climb — the test never drives the machine above it |
-| `TEMP_MAX` | 70 | Stop once the motor reaches this temperature (°C) |
-| `TEMP_STEP` | 3 | Target temperature rise (K) between measured points |
+| `TEMP_MAX` | 70 | Stop once the motor reaches this temperature (°C). The run refuses to start if the motor is less than `2 × TEMP_STEP` below it — there would be no room for a curve |
+| `TEMP_STEP` | 3 | **Minimum** temperature rise (K) between two measured points. The run keeps heating until it is reached, so neighbouring points are always far enough apart to mean something |
 | `MOVES` | 100 | Randomised moves per probe. The old short out-and-back is only used when `REPEAT` is set |
 | `FULLSPEED_FRAC` | 0.5 | Minimum share of those moves that must actually reach `VELOCITY`. Capped at 0.5 — every full-speed sweep needs a reposition move, so more than half cannot reach V |
 | `SEED` | 12345 | Same seed → identical move sequence, so points are comparable |

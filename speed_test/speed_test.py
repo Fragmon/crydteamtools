@@ -17,6 +17,8 @@ import json
 MODULE_NAME = "Speed Test"
 MODULE_VERSION = "1.6"
 JAB_CRUISE_TIME = 0.05          # s at V per jab — identical for every V
+SOAK_MOVES = 20                 # jab moves per heating burst in
+                                # SPEED_TEST_TORQUE_FADE
 SAMPLE_INTERVAL = 0.05          # 20 Hz TMC polling during moves
 TMC_DRIVERS = ['tmc2240', 'tmc5160', 'tmc2209', 'tmc2226',
                'tmc2130', 'tmc2208', 'tmc2660']
@@ -2807,7 +2809,19 @@ new Chart(document.getElementById('envChart'), {
                 "ACCEL_MAX (%.0f) must not be below ACCEL (%.0f)"
                 % (accel_max, accel))
         temp_max = gcmd.get_float('TEMP_MAX', 70.0, above=temp)
-        temp_step = gcmd.get_float('TEMP_STEP', 3.0, above=0.)
+        # A fade curve needs room to fade. Starting 2 K below TEMP_MAX
+        # would yield one point and a meaningless "0 % loss".
+        temp_step_req = gcmd.get_float('TEMP_STEP', 3.0, above=0.)
+        if temp_max - temp < 2.0 * temp_step_req:
+            raise gcmd.error(
+                "speed_test: the motor is already at %.1f °C, only %.1f K "
+                "below TEMP_MAX=%.0f. With TEMP_STEP=%.1f that leaves "
+                "room for fewer than two points and the curve would say "
+                "nothing.\nLet the motor cool down (a fade curve is only "
+                "meaningful when it starts cold), raise TEMP_MAX, or "
+                "lower TEMP_STEP."
+                % (temp, temp_max - temp, temp_max, temp_step_req))
+        temp_step = temp_step_req
         # Heating: long enough to actually push the motor towards
         # TEMP_MAX instead of stopping after a token warm-up.
         soak = gcmd.get_float('SOAK', 120.0, minval=0., maxval=1800.)
@@ -2960,16 +2974,32 @@ new Chart(document.getElementById('envChart'), {
                     gcmd.respond_info(
                         "    heating at %.0f mm/s² (%.0f %% of the limit, "
                         "so warming up cannot itself lose steps) until "
-                        "+%.1f K or %.0f s — your UI will show this "
+                        "+%.1f K (or %.0f s) — your UI will show this "
                         "acceleration, not the measured one."
                         % (soak_accel, soak_frac * 100, temp_step, soak))
+                    # TEMP_STEP is a MINIMUM rise, not a target: keep
+                    # heating until it is reached, so two neighbouring
+                    # points are always far enough apart to mean
+                    # something. SOAK is only the safety cap for a motor
+                    # that has stopped warming up.
                     deadline = self.reactor.monotonic() + soak
+                    t_now = t_after
                     while self.reactor.monotonic() < deadline:
                         self._do_jab_pattern(axis, velocity, soak_accel,
-                                             max(2, repeat // 2), testbench)
-                        t_now, _ = self._read_motor_temp(axis, sensor)
-                        if t_now is not None and t_now - t_after >= temp_step:
+                                             SOAK_MOVES, testbench)
+                        t_read, _ = self._read_motor_temp(axis, sensor)
+                        if t_read is not None:
+                            t_now = t_read
+                        if t_now - t_after >= temp_step:
                             break
+                        if t_now >= temp_max:
+                            break
+                    if t_now - t_after < temp_step:
+                        gcmd.respond_info(
+                            "    only +%.1f K in %.0f s (wanted +%.1f) — "
+                            "raise SOAK or SOAK_FRAC to reach further, or "
+                            "lower TEMP_STEP."
+                            % (t_now - t_after, soak, temp_step))
                     # CRITICAL: the soak leaves the axis at the pattern's
                     # start, not at the endstop. The next measurement
                     # takes its reference BEFORE moving, and compares it
