@@ -125,6 +125,11 @@ class SpeedTest:
                  'a SPEED/ACCEL target. Starts at MAX_CURRENT and '
                  'searches downward.')
         self.gcode.register_command(
+            'SPEED_TEST_ENDSTOP_CHECK',
+            self.cmd_ENDSTOP_CHECK,
+            desc='Validate the lost-step measurement itself: how '
+                 'repeatable is homing, with and without motion')
+        self.gcode.register_command(
             'SPEED_TEST_TORQUE_FADE',
             self.cmd_TORQUE_FADE,
             desc='Measure how the acceleration limit fades as the motor '
@@ -2456,6 +2461,187 @@ new Chart(document.getElementById('envChart'), {
             "Open it via your web UI's config file browser (Speedtest "
             "folder) or any browser. Re-run SPEED_TEST_GUI after config "
             "changes to refresh the baked-in values." % dst)
+
+    # ─── Endstop / measurement-chain check ────────────────────────────
+
+    def cmd_ENDSTOP_CHECK(self, gcmd):
+        """Validate the measurement every other test depends on.
+
+        A "lost step" here means: the stepper's MCU position changed
+        across a re-home. That is only meaningful if homing itself
+        lands on the same spot every time. If the endstop is not
+        repeatable — a sloppy switch, a magnetic/inductive sensor, a
+        second-home speed that is too fast, a loose belt or pulley —
+        the same jitter shows up as phantom step losses, and no amount
+        of tuning will make the results stable.
+
+        Phase A homes repeatedly with NO motion in between: whatever
+        spread appears is pure endstop error. Phase B adds a
+        deliberately gentle move that cannot stall any healthy motor:
+        additional spread there points at mechanics (belt slip, pulley
+        grub screws) rather than the endstop.
+        """
+        try:
+            self._run_endstop_check(gcmd)
+        except self.gcode.error:
+            raise
+        except Exception as e:
+            logging.exception("speed_test: endstop check failed")
+            raise gcmd.error("speed_test: endstop check failed: %s" % e)
+
+    def _run_endstop_check(self, gcmd):
+        testbench, axis = self._parse_testbench_axis(gcmd)
+        self._check_ready()
+        repeat = gcmd.get_int('REPEAT', 8, minval=3, maxval=50)
+        v_max, a_max, _ = self._get_printer_limits()
+        # Deliberately gentle: a quarter of the machine's own limits is
+        # far below anything that could stall a working motor.
+        speed = gcmd.get_float('SPEED', max(20.0, v_max * 0.25), above=0.)
+        accel = gcmd.get_float('ACCEL', max(500.0, a_max * 0.25), above=0.)
+
+        ax_min, ax_max, ax_mid, ax_range = self._get_axis_bounds(axis)
+        usteps = self._get_microsteps(axis)
+        try:
+            kin = self.printer.lookup_object('toolhead').get_kinematics()
+            step_dist = None
+            for s in kin.get_steppers():
+                if s.get_name() == 'stepper_' + axis.lower():
+                    step_dist = s.get_step_dist()
+                    break
+        except Exception:
+            step_dist = None
+
+        def fmt(diff):
+            """microsteps → the units a user can act on."""
+            out = "%d µsteps = %.2f full steps" % (diff, diff / float(usteps))
+            if step_dist:
+                out += " = %.3f mm" % (diff * step_dist)
+            return out
+
+        gcmd.respond_info(
+            "──── ENDSTOP CHECK %s ────\n"
+            "  %d homing cycles per phase | gentle move: %.0f mm/s @ "
+            "%.0f mm/s²\n"
+            "  skip tolerance in use: max_missed = %.2f full steps "
+            "(= %d µsteps)\n"
+            "  Nothing here stresses the motor — every deviation is "
+            "measurement error."
+            % (axis, repeat, speed, accel, self.max_missed,
+               int(self.max_missed * usteps)))
+
+        def home_and_read():
+            self._ensure_homed([axis], testbench=testbench)
+            self.gcode.run_script_from_command("M400")
+            return self._read_mcu_pos(axis)
+
+        # Both phases share ONE reference. Re-zeroing phase B would hide
+        # a systematic shift — exactly what a belt that slips the same
+        # amount every cycle looks like.
+        baseline = {'value': None}
+
+        def run_phase(label, between=None):
+            positions = []
+            for i in range(repeat):
+                if between is not None:
+                    between()
+                pos = home_and_read()
+                if pos is None:
+                    raise gcmd.error(
+                        "speed_test: cannot read the %s stepper MCU "
+                        "position." % axis)
+                if baseline['value'] is None:
+                    baseline['value'] = pos
+                positions.append(pos - baseline['value'])
+                gcmd.respond_info(
+                    "    %s %d/%d: %+d µsteps"
+                    % (label, i + 1, repeat, positions[-1]))
+            spread = max(positions) - min(positions)
+            mean = sum(positions) / float(len(positions))
+            return {'positions': positions, 'spread': spread,
+                    'mean': mean}
+
+        self._set_limits(velocity=speed, accel=accel)
+        try:
+            gcmd.respond_info(
+                "\n>>> Phase A: homing repeatability (no motion) <<<")
+            a = run_phase('home')
+
+            gcmd.respond_info(
+                "\n>>> Phase B: with a gentle move (%.0f mm) <<<"
+                % min(ax_range, 100.0))
+            span = min(ax_range * 0.8, 100.0)
+            lo = max(ax_min, ax_mid - span / 2.0)
+            hi = min(ax_max, lo + span)
+
+            def gentle():
+                self._move_to_axis(axis, hi, speed)
+                self._move_to_axis(axis, lo, speed)
+                self.gcode.run_script_from_command("M400")
+            b = run_phase('move+home', gentle)
+        finally:
+            self._restore_limits()
+
+        thresh = self.max_missed * usteps
+        verdict = []
+        if a['spread'] > thresh:
+            verdict.append(
+                "✗ The endstop alone varies by %s — more than the skip "
+                "tolerance. EVERY test on this axis will report phantom "
+                "step losses. Fix the endstop first: a repeatable "
+                "mechanical switch, a slower second-home speed "
+                "(homing_speed / second_homing_speed), and no flex in "
+                "the mount." % fmt(a['spread']))
+        elif a['spread'] > thresh * 0.5:
+            verdict.append(
+                "⚠ Endstop spread %s is over half the tolerance — "
+                "results will be noisy. Consider a slower "
+                "second_homing_speed." % fmt(a['spread']))
+        else:
+            verdict.append("✓ Homing is repeatable: spread %s."
+                           % fmt(a['spread']))
+
+        extra = b['spread'] - a['spread']
+        drift = abs(b['mean'] - a['mean'])
+        if b['spread'] > thresh:
+            verdict.append(
+                "✗ With a gentle move the spread grows to %s. A move "
+                "this soft cannot stall a healthy motor, so this points "
+                "at mechanics: belt slipping on the pulley, a loose "
+                "grub screw, or a binding rail." % fmt(b['spread']))
+        elif drift > thresh:
+            verdict.append(
+                "✗ Motion shifts the position CONSISTENTLY by %s. A "
+                "repeatable shift is not endstop noise — the axis is "
+                "losing the same amount every cycle. Check the pulley "
+                "grub screws, belt tension and whether the motor "
+                "shaft has a flat." % fmt(drift))
+        elif extra > thresh * 0.3 or drift > thresh * 0.5:
+            verdict.append(
+                "⚠ Motion adds %s of spread and shifts the reference by "
+                "%s — small, but worth checking pulley grub screws and "
+                "belt tension." % (fmt(max(0, extra)), fmt(drift)))
+        else:
+            verdict.append(
+                "✓ Motion adds almost nothing (spread %s, shift %s) — "
+                "the measurement chain is sound."
+                % (fmt(max(0, extra)), fmt(drift)))
+
+        suggested = max(1.0, math.ceil(
+            (max(a['spread'], b['spread']) / float(usteps)) * 3.0))
+        verdict.append(
+            "Suggested max_missed for this axis: %.1f full steps "
+            "(3× the observed spread). Yours is %.2f."
+            % (suggested, self.max_missed))
+        if max(a['spread'], b['spread']) <= thresh:
+            verdict.append(
+                "A test reporting thousands of lost µsteps on this axis "
+                "is therefore a REAL loss, not measurement error.")
+
+        gcmd.respond_info(
+            "\n──── result ────\n"
+            "  Phase A (endstop only): spread %s\n"
+            "  Phase B (with motion):  spread %s\n\n%s"
+            % (fmt(a['spread']), fmt(b['spread']), "\n".join(verdict)))
 
     # ─── Torque fade over temperature ─────────────────────────────────
 

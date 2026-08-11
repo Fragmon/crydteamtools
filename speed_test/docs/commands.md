@@ -176,6 +176,42 @@ the `ST_GUI` macro.
 
 ---
 
+## `SPEED_TEST_ENDSTOP_CHECK`
+
+**Validates the measurement every other test depends on.** A "lost step" in
+this plugin means: the stepper's MCU position changed across a re-home. That
+is only meaningful if homing lands on the same spot every time — a sloppy
+switch, a magnetic/inductive sensor, a too-fast second homing pass or a flexy
+endstop mount all show up as *phantom* step losses that no tuning can fix.
+
+Run this first when results look implausible — for example when a test
+reports thousands of lost microsteps but the machine is silent, or when
+repeated runs disagree wildly.
+
+| Parameter | Default | Description |
+|---|---|---|
+| `AXIS` | config | Axis to check |
+| `REPEAT` | 8 | Homing cycles per phase |
+| `SPEED` | 25 % of `max_velocity` | Speed of the gentle move in phase B |
+| `ACCEL` | 25 % of `max_accel` | Acceleration of that move |
+
+**Phase A** homes repeatedly with no motion in between — whatever spread
+appears is pure endstop error. **Phase B** adds a deliberately gentle move
+that cannot stall a healthy motor; both phases share one reference, so a
+*consistent* shift is caught too (a belt that slips the same amount every
+cycle would be invisible if each phase were re-zeroed).
+
+The report gives the spread in microsteps, full steps and mm, compares it
+with your `max_missed` tolerance, suggests a value based on the measured
+noise, and — when the chain is clean — states explicitly that a large
+reported loss is real rather than measurement error.
+
+```
+SPEED_TEST_ENDSTOP_CHECK AXIS=X
+```
+
+---
+
 ## `SPEED_TEST_TORQUE_FADE`
 
 Measures **how much acceleration the motor still holds as it heats up**.
