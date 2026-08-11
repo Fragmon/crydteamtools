@@ -2907,6 +2907,12 @@ new Chart(document.getElementById('envChart'), {
                     soak_accel = limit * 0.7
                     self._set_limits(velocity=velocity * 1.2,
                                      accel=soak_accel)
+                    gcmd.respond_info(
+                        "    heating at %.0f mm/s² (70 %% of the limit, "
+                        "so warming up cannot itself lose steps) until "
+                        "+%.1f K or %.0f s — your UI will show this "
+                        "acceleration, not the measured one."
+                        % (soak_accel, temp_step, soak))
                     deadline = self.reactor.monotonic() + soak
                     while self.reactor.monotonic() < deadline:
                         self._do_jab_pattern(axis, velocity, soak_accel,
