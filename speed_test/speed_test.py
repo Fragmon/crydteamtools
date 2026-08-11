@@ -2846,13 +2846,28 @@ new Chart(document.getElementById('envChart'), {
                     break
                 # Soak: keep moving to heat the motor further.
                 if soak > 0:
+                    # Heat at a safe fraction of the limit. Soaking AT
+                    # the limit would risk real step losses that nobody
+                    # measures, poisoning the next point.
+                    soak_accel = limit * 0.7
+                    self._set_limits(velocity=velocity * 1.2,
+                                     accel=soak_accel)
                     deadline = self.reactor.monotonic() + soak
                     while self.reactor.monotonic() < deadline:
-                        self._do_jab_pattern(axis, velocity, limit,
+                        self._do_jab_pattern(axis, velocity, soak_accel,
                                              max(2, repeat // 2), testbench)
                         t_now, _ = self._read_motor_temp(axis, sensor)
                         if t_now is not None and t_now - t_after >= temp_step:
                             break
+                    # CRITICAL: the soak leaves the axis at the pattern's
+                    # start, not at the endstop. The next measurement
+                    # takes its reference BEFORE moving, and compares it
+                    # against the position after a re-home — so without
+                    # homing here, that difference is the park-to-home
+                    # distance and every first probe after a soak reports
+                    # a phantom loss of exactly that many microsteps.
+                    self._ensure_homed([axis], testbench=testbench)
+                    self.gcode.run_script_from_command("M400")
                 t_soaked, _ = self._read_motor_temp(axis, sensor)
                 if t_soaked - t_after < temp_step * 0.3:
                     stalled_rise += 1
