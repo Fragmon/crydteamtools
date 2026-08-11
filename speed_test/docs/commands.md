@@ -262,6 +262,15 @@ SPEED_TEST_TORQUE_FADE AXIS=X VELOCITY=400 ACCEL=30000 TEMP_MAX=65
 
 (UI macro: `ST_TORQUE_FADE`)
 
+Before the first recorded point the run makes a **reference run at half the
+starting acceleration**. No healthy motor fails that, so a failure there is
+never a torque limit — it is the setup. Because a one-time effect (the Z
+lift and park move of the very first pattern) cannot be told from a real
+problem in a single measurement, the reference is repeated once: if the
+repeat passes it was a one-time artefact and the run continues from a clean
+state; if it fails twice the run aborts and points at
+`SPEED_TEST_ENDSTOP_CHECK`.
+
 The run stops early when the temperature stops rising (thermal equilibrium).
 Output: a CSV and a self-contained HTML report (inline SVG chart, works
 offline) with the acceleration/temperature curve, each point as a percentage

@@ -2900,6 +2900,45 @@ new Chart(document.getElementById('envChart'), {
             # anywhere else, that distance is reported as a step loss.
             self.gcode.run_script_from_command("G28 " + axis)
             self.gcode.run_script_from_command("M400")
+
+            # Reference run at half the acceleration, before anything is
+            # recorded. No healthy motor can fail this, so a failure
+            # here is never torque — it is the setup (a Z lift, a park
+            # move or a homing quirk that happens exactly once). It also
+            # absorbs whatever one-time state the first real probe would
+            # otherwise be blamed for.
+            ref_accel = accel * 0.5
+            self._apply_limits_checked(gcmd, velocity * 1.2, ref_accel)
+            ref = probe(ref_accel)
+            if ref['failed']:
+                # A one-time effect does not repeat — that is what
+                # separates it from a broken setup. Run it again.
+                gcmd.respond_info(
+                    "  reference run lost %d µsteps at half acceleration "
+                    "— repeating it to tell a one-time effect from a "
+                    "real problem." % ref['max_diff'])
+                ref2 = probe(ref_accel)
+                if ref2['failed']:
+                    raise gcmd.error(
+                        "speed_test: the reference run at %.0f mm/s² — "
+                        "half of your starting acceleration — lost steps "
+                        "TWICE (%d and %d µsteps). That is not a torque "
+                        "limit; something in the setup is wrong.\n"
+                        "Run SPEED_TEST_ENDSTOP_CHECK AXIS=%s: it "
+                        "measures whether homing is repeatable and "
+                        "whether motion shifts the reference."
+                        % (ref_accel, ref['max_diff'], ref2['max_diff'],
+                           axis))
+                gcmd.respond_info(
+                    "  ...the repeat passed, so it was a one-time "
+                    "artefact of the first move (Z lift, park move) and "
+                    "not a torque limit. Absorbed — the curve below "
+                    "starts from a clean state.")
+            else:
+                gcmd.respond_info(
+                    "  reference run at %.0f mm/s² passed — the "
+                    "measurement chain is sound, so any failure from "
+                    "here on is real." % ref_accel)
             first = True
             stalled_rise = 0
             while len(results) < max_points:
