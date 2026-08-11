@@ -245,6 +245,16 @@ class SpeedTest:
             # Home only the missing axes — never trigger Y unless we need Y.
             self.gcode.run_script_from_command(
                 "G28 " + " ".join(a.upper() for a in missing))
+            # The missing set may not contain the TEST axes — e.g. only
+            # Z was unhomed. Callers rely on this leaving the tested
+            # axes at a fresh endstop reference, because the lost-step
+            # comparison is baseline-at-home vs position-after-home. If
+            # the test axis is left wherever it happened to stand, the
+            # first measurement reports that distance as a step loss.
+            rest = [a for a in axes if a.lower() not in missing]
+            if rest:
+                self.gcode.run_script_from_command(
+                    "G28 " + " ".join(rest))
             return
         self.gcode.run_script_from_command(
             "G28 " + " ".join(axes))
