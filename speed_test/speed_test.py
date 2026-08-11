@@ -2495,6 +2495,23 @@ new Chart(document.getElementById('envChart'), {
         return None, None
 
     def cmd_TORQUE_FADE(self, gcmd):
+        """Entry point — see _run_torque_fade for the actual run.
+
+        Klipper turns any exception that is not a gcode error into
+        'Internal error on command' and shuts the printer down. This
+        run drives the machine for many minutes, so an unexpected error
+        is converted into a normal command error: the run aborts and
+        reports, but the printer stays alive.
+        """
+        try:
+            self._run_torque_fade(gcmd)
+        except self.gcode.error:
+            raise
+        except Exception as e:
+            logging.exception("speed_test: torque fade failed")
+            raise gcmd.error("speed_test: torque-fade run failed: %s" % e)
+
+    def _run_torque_fade(self, gcmd):
         """Track the acceleration limit while the motor heats itself.
 
         Torque falls as a motor warms: NdFeB loses ~0.11 %/K of
@@ -2504,7 +2521,7 @@ new Chart(document.getElementById('envChart'), {
         stress moves themselves are what warms the motor, so it simply
         keeps re-measuring the limit as the temperature climbs.
         """
-        axis, testbench = self._parse_testbench_axis(gcmd)
+        testbench, axis = self._parse_testbench_axis(gcmd)
         self._check_ready()
         sensor = gcmd.get('SENSOR', None)
         temp, source = self._read_motor_temp(axis, sensor)
