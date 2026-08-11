@@ -721,9 +721,27 @@ class SpeedTest:
 
     def _current_limits(self):
         """Live motion limits from the toolhead — reflects the
-        SET_VELOCITY_LIMIT values active during the current test."""
+        SET_VELOCITY_LIMIT values active during the current test.
+
+        Read through get_status(), the public API the web UIs use, not
+        through the toolhead's attributes: a build that clamps or
+        rescales SET_VELOCITY_LIMIT can report a different effective
+        value there, and the attribute would show the requested one.
+        Reading what the UI reads means the plugin cannot silently
+        disagree with what the machine actually does.
+        """
         try:
             th = self.printer.lookup_object('toolhead')
+            try:
+                st = th.get_status(self.reactor.monotonic())
+                v = st.get('max_velocity')
+                a = st.get('max_accel')
+                scv = st.get('square_corner_velocity')
+                if v is not None and a is not None:
+                    return (float(v), float(a),
+                            float(scv if scv is not None else 5.0))
+            except Exception:
+                pass
             return (th.max_velocity, th.max_accel,
                     th.square_corner_velocity)
         except Exception:
