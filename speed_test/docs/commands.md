@@ -176,6 +176,57 @@ the `ST_GUI` macro.
 
 ---
 
+## `SPEED_TEST_TORQUE_FADE`
+
+Measures **how much acceleration the motor still holds as it heats up**.
+A stepper loses torque when warm: NdFeB magnets lose ~0.11 %/K of remanence
+(the torque constant drops) and the winding resistance rises ~0.39 %/K, which
+eats the voltage headroom fast moves need. A limit found on a cold motor
+therefore does not survive an hour of printing.
+
+No heater is needed — the stress moves themselves warm the motor, so the test
+simply keeps re-measuring the limit while the temperature climbs. It tracks
+the limit in both directions: it steps down when a probe fails and tries one
+step up when it holds, so the curve follows the real limit instead of
+drifting downwards.
+
+**Requires a motor temperature sensor**, configured in `[speed_test]`:
+
+```ini
+motor_sensor_x: temperature_sensor motor_x
+motor_sensor_y: temperature_sensor motor_y
+```
+
+(or a single `motor_sensor:` for all axes, or `SENSOR=` per run). On a
+TMC2240 the driver's own die sensor is used as a fallback — that is not the
+winding temperature, but it tracks it.
+
+| Parameter | Default | Description |
+|---|---|---|
+| `AXIS` | config | Axis to test |
+| `VELOCITY` | printer `max_velocity` | Speed of the probe moves — use the speed you care about, e.g. the fastest point from your limit map |
+| `ACCEL` | printer `max_accel` | Starting acceleration. The first point climbs from here until it breaks, establishing the cold limit |
+| `TEMP_MAX` | 70 | Stop once the motor reaches this temperature (°C) |
+| `TEMP_STEP` | 3 | Target temperature rise (K) between measured points |
+| `SOAK` | 25 | Max seconds of heating moves between points |
+| `STEP` | 0.05 | Acceleration step size (5 %) |
+| `REPEAT` | 10 | Probe moves per measurement |
+| `MAX_POINTS` | 20 | Safety cap on the number of points |
+| `SENSOR` | config | Override the temperature sensor for this run |
+
+```
+SPEED_TEST_TORQUE_FADE AXIS=X VELOCITY=400 ACCEL=30000 TEMP_MAX=65
+```
+
+(UI macro: `ST_TORQUE_FADE`)
+
+The run stops early when the temperature stops rising (thermal equilibrium).
+Output: a CSV and a self-contained HTML report (inline SVG chart, works
+offline) with the acceleration/temperature curve, each point as a percentage
+of the cold limit, and the fade rate in **% per 10 K**.
+
+---
+
 ## `SPEED_TEST_STATUS`
 
 Diagnostic. Prints structure, default axis, axis bounds, TMC presence +

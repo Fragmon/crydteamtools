@@ -63,6 +63,7 @@ mode: **[Configuration →](docs/configuration.md)**
 | [`SPEED_TEST_FIND_MAX_SCV`](docs/commands.md#speed_test_find_max_scv) | Max safe square-corner velocity (XY) |
 | [`SPEED_TEST_FIND_OPTIMAL_CURRENT`](docs/commands.md#speed_test_find_optimal_current) | Lowest `run_current` that still hits a speed/accel target |
 | [`SPEED_TEST_BENCHMARK`](docs/commands.md#speed_test_benchmark) | Repeatable pass/fail stress test |
+| [`SPEED_TEST_TORQUE_FADE`](docs/commands.md#speed_test_torque_fade) | How much accel the motor still holds as it heats up (needs a motor thermistor) |
 | [`SPEED_TEST_STATUS`](docs/commands.md#speed_test_status) | Diagnostic — config, axes, TMC, warnings |
 | [`SPEED_TEST_GUI`](docs/gui.md) | Writes the **control panel** (see below) |
 

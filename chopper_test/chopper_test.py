@@ -39,6 +39,15 @@ TRINAMIC_DRIVERS = ("tmc2130", "tmc2209", "tmc2240", "tmc5160", "tmc2660")
 # are the `sync` field there — writing them would do something else).
 TPFD_DRIVERS = ("tmc5160", "tmc2240")
 
+# Internal clock used to convert TPWMTHRS back into a velocity.
+TMC_FREQUENCY = {
+    "tmc2130": 13200000.,
+    "tmc2209": 12000000.,
+    "tmc2240": 12500000.,
+    "tmc5160": 12500000.,
+    "tmc2660": 15000000.,
+}
+
 # ─── Safe sweep space (SpreadCycle / chm=0 only) ──────────────────────
 # toff=0 disables all bridges ("Driver disable, all bridges off"), and
 # toff=1 is only legal with tbl>=2 — starting at 2 removes that ordering
@@ -186,19 +195,65 @@ class ChopperTest:
                             name, value, e)
             return False
 
-    def _spreadcycle_active(self, axis):
-        """chopper tuning only means anything in SpreadCycle."""
+    def _stealthchop_max_velocity(self, axis):
+        """Speed (mm/s) below which StealthChop is used, or None.
+
+        StealthChop applies while TSTEP >= TPWMTHRS, and TSTEP is the
+        time between steps — large when slow. So TPWMTHRS is an UPPER
+        VELOCITY limit for StealthChop: a large TPWMTHRS confines it to
+        a crawl, and TPWMTHRS=0 means no limit (StealthChop always).
+        Returns inf when StealthChop is unlimited, 0.0 when it is off.
+        """
+        tp = self._field(axis, 'tpwmthrs')
+        if tp is None:
+            return None
+        if tp == 0:
+            return float('inf')
+        info = self._lookup_tmc(axis)
+        freq = TMC_FREQUENCY.get(info[0] if info else '', 12.5e6)
+        mres = self._field(axis, 'mres')
+        try:
+            kin = self.printer.lookup_object('toolhead').get_kinematics()
+            want = self._stepper_name(axis)
+            step_dist = None
+            for s in kin.get_steppers():
+                if s.get_name() == want:
+                    step_dist = s.get_step_dist()
+                    break
+            if step_dist is None or mres is None:
+                return None
+            # Klipper converts a velocity to TPWMTHRS with the distance
+            # of a 1/256 microstep, so invert exactly that.
+            step_dist_256 = step_dist * (256 >> mres) / 256.0
+            return freq * step_dist_256 / tp
+        except Exception:
+            return None
+
+    def _spreadcycle_active(self, axis, velocity=None):
+        """Do the chopper registers act at the tested speed?
+
+        Not simply 'en_pwm_mode == 0': a config can enable StealthChop
+        while confining it to near-standstill via TPWMTHRS, and then
+        every test move still runs in SpreadCycle — tuning is perfectly
+        valid there. Judging by en_pwm_mode alone would refuse such a
+        machine for no reason.
+        """
         en_pwm = self._field(axis, 'en_pwm_mode')       # 5160/2130/2240
-        if en_pwm is not None:
-            return en_pwm == 0
-        # TMC2209: Klipper's field table spells this all-lowercase.
-        # Probe both so a driver library that differs still works —
-        # getting this wrong silently disables the StealthChop guard.
-        for name in ('en_spreadcycle', 'en_spreadCycle'):
-            v = self._field(axis, name)
-            if v is not None:
-                return v == 1
-        return None
+        if en_pwm is None:
+            # TMC2209: Klipper's field table spells this all-lowercase.
+            for name in ('en_spreadcycle', 'en_spreadCycle'):
+                v = self._field(axis, name)
+                if v is not None:
+                    return v == 1
+            return None
+        if en_pwm == 0:
+            return True                     # SpreadCycle at every speed
+        if velocity is None:
+            return False
+        limit = self._stealthchop_max_velocity(axis)
+        if limit is None:
+            return False
+        return velocity > limit
 
     # ─── Motion + lost-step verdict ─────────────────────────────────
 
@@ -524,12 +579,18 @@ class ChopperTest:
             return
         drv = info[0]
         lines.append("  driver: %s on %s" % (drv, self._stepper_name(axis)))
-        spread = self._spreadcycle_active(axis)
-        lines.append("  chopper mode: %s"
-                     % ("SpreadCycle ✓" if spread
-                        else "StealthChop ✗ (chopper tuning has no "
-                             "effect — remove stealthchop_threshold)"
-                        if spread is False else "unknown"))
+        limit = self._stealthchop_max_velocity(axis)
+        en_pwm = self._field(axis, 'en_pwm_mode')
+        if en_pwm == 0 or (en_pwm is None
+                           and self._spreadcycle_active(axis) is True):
+            mode = "SpreadCycle at every speed ✓ tunable"
+        elif limit in (None, float('inf')):
+            mode = ("StealthChop at every speed ✗ — the chopper "
+                    "registers do nothing here")
+        else:
+            mode = ("StealthChop below %.2f mm/s, SpreadCycle above ✓ "
+                    "tunable (test moves are far above that)" % limit)
+        lines.append("  chopper mode: %s" % mode)
         vals = []
         for f in ('toff', 'tbl', 'hstrt', 'hend', 'tpfd'):
             v = self._field(axis, f)
@@ -568,12 +629,20 @@ class ChopperTest:
                 "chopper_test: no TMC driver found for %s."
                 % self._stepper_name(axis))
         drv = info[0]
-        if self._spreadcycle_active(axis) is False:
+        if self._spreadcycle_active(axis, velocity) is False:
+            limit = self._stealthchop_max_velocity(axis)
             raise self.gcode.error(
-                "chopper_test: %s is in StealthChop — the chopper "
-                "registers have no effect there. Remove "
-                "stealthchop_threshold from [%s %s] and FIRMWARE_RESTART."
-                % (axis, drv, self._stepper_name(axis)))
+                "chopper_test: %s runs in StealthChop up to %s — the "
+                "chopper registers have no effect there, so the test "
+                "speed of %.0f mm/s would measure nothing. Either "
+                "raise VELOCITY above that, or set "
+                "'stealthchop_threshold: 0' in [%s %s] (which keeps "
+                "StealthChop for standstill only) and "
+                "FIRMWARE_RESTART."
+                % (axis,
+                   "every speed" if limit in (None, float('inf'))
+                   else "%.1f mm/s" % limit,
+                   velocity, drv, self._stepper_name(axis)))
 
         # Original register state — restored no matter how we leave.
         fields = ['toff', 'tbl', 'hstrt', 'hend']

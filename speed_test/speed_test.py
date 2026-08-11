@@ -60,6 +60,17 @@ class SpeedTest:
         # command parameter asks for more.
         self.max_current = config.getfloat('max_current', 0.0, minval=0.)
 
+        # Optional motor temperature sensors for SPEED_TEST_TORQUE_FADE.
+        # Either one sensor for every axis, or per-axis overrides:
+        #   motor_sensor:   temperature_sensor motor
+        #   motor_sensor_x: temperature_sensor motor_x
+        self.motor_sensor = config.get('motor_sensor', '').strip()
+        self.motor_sensor_axis = {}
+        for ax in ('x', 'y', 'z'):
+            name = config.get('motor_sensor_' + ax, '').strip()
+            if name:
+                self.motor_sensor_axis[ax.upper()] = name
+
         config_dir = os.path.expanduser('~/printer_data/config')
         if not os.path.isdir(config_dir):
             config_dir = os.path.expanduser('~')
@@ -113,6 +124,11 @@ class SpeedTest:
             desc='Find the lowest TMC run_current that still passes '
                  'a SPEED/ACCEL target. Starts at MAX_CURRENT and '
                  'searches downward.')
+        self.gcode.register_command(
+            'SPEED_TEST_TORQUE_FADE',
+            self.cmd_TORQUE_FADE,
+            desc='Measure how the acceleration limit fades as the motor '
+                 'heats up (needs a motor temperature sensor)')
         self.gcode.register_command(
             'SPEED_TEST_STATUS',
             self.cmd_STATUS,
@@ -2440,6 +2456,322 @@ new Chart(document.getElementById('envChart'), {
             "Open it via your web UI's config file browser (Speedtest "
             "folder) or any browser. Re-run SPEED_TEST_GUI after config "
             "changes to refresh the baked-in values." % dst)
+
+    # ─── Torque fade over temperature ─────────────────────────────────
+
+    def _read_motor_temp(self, axis, override=None):
+        """Motor temperature in °C, or (None, None).
+
+        Order: explicit SENSOR= parameter, per-axis config, shared
+        config, and finally the driver's own die sensor (TMC2240
+        reports one) — which is not the winding temperature but still
+        tracks it.
+        """
+        names = [n for n in (override,
+                             self.motor_sensor_axis.get(axis),
+                             self.motor_sensor) if n]
+        now = self.reactor.monotonic()
+        for name in names:
+            try:
+                obj = self.printer.lookup_object(name, None)
+                if obj is None:
+                    continue
+                if hasattr(obj, 'get_temp'):
+                    res = obj.get_temp(now)
+                    val = res[0] if isinstance(res, tuple) else res
+                    return float(val), name
+                if hasattr(obj, 'last_temp'):
+                    return float(obj.last_temp), name
+            except Exception:
+                continue
+        info = self._lookup_tmc_for_axis(axis)
+        if info:
+            try:
+                t = info[1].get_status(now).get('temperature')
+                if t is not None:
+                    return float(t), "%s driver sensor" % info[0]
+            except Exception:
+                pass
+        return None, None
+
+    def cmd_TORQUE_FADE(self, gcmd):
+        """Track the acceleration limit while the motor heats itself.
+
+        Torque falls as a motor warms: NdFeB loses ~0.11 %/K of
+        remanence (so the torque constant drops) and the winding
+        resistance rises ~0.39 %/K, which eats the voltage headroom
+        that high-speed moves need. The test needs no heater — the
+        stress moves themselves are what warms the motor, so it simply
+        keeps re-measuring the limit as the temperature climbs.
+        """
+        axis, testbench = self._parse_testbench_axis(gcmd)
+        self._check_ready()
+        sensor = gcmd.get('SENSOR', None)
+        temp, source = self._read_motor_temp(axis, sensor)
+        if temp is None:
+            raise gcmd.error(
+                "speed_test: no motor temperature sensor for %s. Add one "
+                "to [speed_test], e.g.\n"
+                "    motor_sensor_%s: temperature_sensor motor_%s\n"
+                "or pass SENSOR=<full section name>."
+                % (axis, axis.lower(), axis.lower()))
+
+        v_max, a_max, _ = self._get_printer_limits()
+        velocity = gcmd.get_float('VELOCITY', v_max, above=0.)
+        accel = gcmd.get_float('ACCEL', a_max, above=0.)
+        temp_max = gcmd.get_float('TEMP_MAX', 70.0, above=temp)
+        temp_step = gcmd.get_float('TEMP_STEP', 3.0, above=0.)
+        soak = gcmd.get_float('SOAK', 25.0, minval=0., maxval=600.)
+        step = gcmd.get_float('STEP', 0.05, above=0., below=0.5)
+        repeat = gcmd.get_int('REPEAT', 10, minval=2, maxval=100)
+        max_points = gcmd.get_int('MAX_POINTS', 20, minval=2, maxval=100)
+
+        gcmd.respond_info(
+            "──── TORQUE FADE %s ────\n"
+            "  sensor: %s (now %.1f °C) → stop at %.0f °C\n"
+            "  velocity %.0f mm/s | starting accel %.0f mm/s² | "
+            "step %.0f%% | %d moves per probe\n"
+            "  The stress moves heat the motor themselves; between "
+            "points it soaks up to %.0f s or until +%.1f K."
+            % (axis, source, temp, temp_max, velocity, accel, step * 100,
+               repeat, soak, temp_step))
+
+        results = []
+        timestamp = time.strftime('%Y-%m-%d_%H-%M-%S')
+        meta = {
+            'axis': axis,
+            'sensor': source,
+            'velocity': '%.0f mm/s' % velocity,
+            'start_accel': '%.0f mm/s²' % accel,
+            'step': '%.0f %%' % (step * 100),
+            'probe_moves': repeat,
+            'temp_start': '%.1f °C' % temp,
+            'temp_max': '%.0f °C' % temp_max,
+        }
+
+        def probe(a):
+            return self._measure_step(
+                gcmd, [axis], 'accel', a,
+                lambda: self._do_jab_pattern(axis, velocity, a, repeat,
+                                             testbench),
+                testbench=testbench)
+
+        self._set_limits(velocity=velocity * 1.2, accel=accel)
+        try:
+            self._ensure_homed([axis], testbench=testbench)
+            first = True
+            stalled_rise = 0
+            while len(results) < max_points:
+                t_before, _ = self._read_motor_temp(axis, sensor)
+                # Track the limit: step down while it fails, and try one
+                # step up when it holds, so the curve follows the true
+                # limit in both directions instead of drifting down.
+                limit = None
+                for _ in range(8):
+                    self._set_limits(velocity=velocity * 1.2, accel=accel)
+                    r = probe(accel)
+                    if r['failed']:
+                        accel = max(100.0, accel * (1.0 - step))
+                        continue
+                    limit = accel
+                    if first:
+                        # Establish the cold limit properly: climb until
+                        # it breaks, then keep the last value that held.
+                        up = accel * (1.0 + step)
+                        self._set_limits(velocity=velocity * 1.2, accel=up)
+                        r2 = probe(up)
+                        if not r2['failed']:
+                            accel = up
+                            continue
+                    break
+                first = False
+                t_after, _ = self._read_motor_temp(axis, sensor)
+                if limit is None:
+                    gcmd.respond_info(
+                        "  %.1f °C: no acceleration held down to %.0f — "
+                        "stopping." % (t_after, accel))
+                    break
+                results.append({'temp': (t_before + t_after) / 2.0,
+                                'temp_before': t_before,
+                                'temp_after': t_after,
+                                'accel': limit})
+                ref = results[0]['accel']
+                gcmd.respond_info(
+                    "  %.1f °C  →  %.0f mm/s²  (%.0f %% of cold limit)"
+                    % (results[-1]['temp'], limit, 100.0 * limit / ref))
+                if t_after >= temp_max:
+                    gcmd.respond_info("  reached %.0f °C — done."
+                                      % temp_max)
+                    break
+                # Soak: keep moving to heat the motor further.
+                if soak > 0:
+                    deadline = self.reactor.monotonic() + soak
+                    while self.reactor.monotonic() < deadline:
+                        self._do_jab_pattern(axis, velocity, limit,
+                                             max(2, repeat // 2), testbench)
+                        t_now, _ = self._read_motor_temp(axis, sensor)
+                        if t_now is not None and t_now - t_after >= temp_step:
+                            break
+                t_soaked, _ = self._read_motor_temp(axis, sensor)
+                if t_soaked - t_after < temp_step * 0.3:
+                    stalled_rise += 1
+                    if stalled_rise >= 2:
+                        gcmd.respond_info(
+                            "  temperature no longer rising (%.1f °C) — "
+                            "thermal equilibrium reached, done."
+                            % t_soaked)
+                        break
+                else:
+                    stalled_rise = 0
+        finally:
+            self._restore_limits()
+
+        if len(results) < 2:
+            gcmd.respond_info(
+                "Not enough points for a fade curve — let the motor cool "
+                "down first, or lower TEMP_STEP.")
+            return
+
+        t0, a0 = results[0]['temp'], results[0]['accel']
+        t1, a1 = results[-1]['temp'], results[-1]['accel']
+        dt = t1 - t0
+        fade = ((a0 - a1) / a0 * 100.0) if a0 else 0.0
+        per10 = (fade / dt * 10.0) if dt > 0.5 else None
+        gcmd.respond_info(
+            "\n──── result ────\n"
+            "  %.1f °C: %.0f mm/s²   →   %.1f °C: %.0f mm/s²\n"
+            "  lost %.1f %% of the acceleration over %.1f K%s\n"
+            "  Use the value at the temperature your printer actually "
+            "reaches mid-print, not the cold one."
+            % (t0, a0, t1, a1, fade, dt,
+               " (%.1f %% per 10 K)" % per10 if per10 else ""))
+        meta['fade'] = '%.1f %% over %.1f K' % (fade, dt)
+        self._save_fade_report(results, meta, timestamp, gcmd,
+                               gcmd.get_int('NO_HTML', 0))
+
+    def _save_fade_report(self, results, meta, timestamp, gcmd, no_html):
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+            csv_path = os.path.join(
+                self.output_dir, 'speed_torque_fade_%s.csv' % timestamp)
+            with open(csv_path, 'w') as f:
+                self._write_csv_preamble(
+                    f, "Speed Test v%s results — torque fade"
+                    % MODULE_VERSION, meta)
+                f.write("temp_c,temp_before_c,temp_after_c,accel_mm_s2,"
+                        "pct_of_cold\n")
+                ref = results[0]['accel']
+                for r in results:
+                    f.write("%.2f,%.2f,%.2f,%.0f,%.1f\n"
+                            % (r['temp'], r['temp_before'], r['temp_after'],
+                               r['accel'], 100.0 * r['accel'] / ref))
+            gcmd.respond_info("CSV saved: %s" % csv_path)
+            if not no_html:
+                html_path = os.path.join(
+                    self.output_dir,
+                    'speed_torque_fade_%s.html' % timestamp)
+                self._write_fade_html(html_path, results, meta)
+                gcmd.respond_info("HTML saved: %s" % html_path)
+        except Exception as e:
+            gcmd.respond_info("Warning: report write failed: %s" % e)
+            logging.exception("speed_test: fade report write failed")
+
+    def _write_fade_html(self, path, results, meta):
+        """Self-contained report with an inline SVG chart — no CDN, so
+        it also opens on a machine with no internet."""
+        ref = results[0]['accel']
+        temps = [r['temp'] for r in results]
+        accels = [r['accel'] for r in results]
+        t_lo, t_hi = min(temps), max(temps)
+        a_lo, a_hi = min(accels), max(accels)
+        t_span = max(0.1, t_hi - t_lo)
+        a_span = max(1.0, a_hi - a_lo)
+        W, H, PAD = 720, 340, 52
+
+        def sx(t):
+            return PAD + (t - t_lo) / t_span * (W - 2 * PAD)
+
+        def sy(a):
+            return H - PAD - (a - a_lo) / a_span * (H - 2 * PAD)
+
+        pts = " ".join("%.1f,%.1f" % (sx(r['temp']), sy(r['accel']))
+                       for r in results)
+        dots = "".join(
+            '<circle cx="%.1f" cy="%.1f" r="4" fill="#1565c0">'
+            '<title>%.1f °C — %.0f mm/s² (%.0f %%)</title></circle>'
+            % (sx(r['temp']), sy(r['accel']), r['temp'], r['accel'],
+               100.0 * r['accel'] / ref) for r in results)
+        xlab = "".join(
+            '<text x="%.1f" y="%d" font-size="11" text-anchor="middle" '
+            'fill="#6b7787">%.0f</text>'
+            % (sx(t_lo + i * t_span / 4.0), H - PAD + 18,
+               t_lo + i * t_span / 4.0) for i in range(5))
+        ylab = "".join(
+            '<text x="%d" y="%.1f" font-size="11" text-anchor="end" '
+            'fill="#6b7787">%.0f</text>'
+            % (PAD - 8, sy(a_lo + i * a_span / 4.0) + 4,
+               a_lo + i * a_span / 4.0) for i in range(5))
+        grid = "".join(
+            '<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="#e6ebf3"/>'
+            % (PAD, sy(a_lo + i * a_span / 4.0), W - PAD,
+               sy(a_lo + i * a_span / 4.0)) for i in range(5))
+        rows = "".join(
+            "<tr><td>%.1f</td><td>%.0f</td><td>%.1f %%</td></tr>"
+            % (r['temp'], r['accel'], 100.0 * r['accel'] / ref)
+            for r in results)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write("""<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport"
+ content="width=device-width, initial-scale=1">
+<title>Speed Test — Torque fade over temperature</title><style>
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#eef2f9;
+ color:#1f2733;margin:0;padding:0 16px 50px;line-height:1.55}
+.wrap{max-width:860px;margin:0 auto}
+header{background:linear-gradient(135deg,#1565c0,#42a5f5);color:#fff;
+ border-radius:0 0 18px 18px;padding:22px 24px;margin:0 -16px 20px}
+h1{margin:0;font-size:21px}.sub{font-size:13px;opacity:.92;margin-top:5px}
+.card{background:#fff;border:1px solid #e6ebf3;border-radius:14px;
+ padding:16px 18px;margin-bottom:16px}
+.card h2{margin:0 0 10px;font-size:15px;color:#1565c0}
+.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));
+ gap:6px 14px;font-size:13px;color:#4a5666}
+table{border-collapse:collapse;width:100%%;font-size:13px}
+th,td{padding:6px 10px;text-align:right;border-bottom:1px solid #eef1f6}
+th:first-child,td:first-child{text-align:left}
+thead th{background:#f3f6fb;color:#6b7787;font-weight:600}
+</style></head><body><div class="wrap">
+<header><h1>&#127777; Torque fade over temperature</h1>
+<div class="sub">How much acceleration the motor still holds as it
+ heats up &middot; Crydteam speed_test</div></header>
+<div class="card"><h2>Run</h2><div class="meta">%s</div></div>
+<div class="card"><h2>Acceleration vs. motor temperature</h2>
+<svg viewBox="0 0 %d %d" width="100%%" style="max-width:%dpx">
+<rect x="%d" y="%d" width="%d" height="%d" fill="#fbfcfe"
+ stroke="#e6ebf3"/>%s
+<polyline points="%s" fill="none" stroke="#1565c0" stroke-width="2"/>%s
+%s%s
+<text x="%d" y="%d" font-size="12" text-anchor="middle"
+ fill="#6b7787">motor temperature (&deg;C)</text>
+<text x="14" y="%d" font-size="12" text-anchor="middle"
+ fill="#6b7787" transform="rotate(-90 14 %d)">accel (mm/s&sup2;)</text>
+</svg></div>
+<div class="card"><h2>Measured points</h2><table><thead><tr>
+<th>Motor temp (&deg;C)</th><th>Accel (mm/s&sup2;)</th>
+<th>of cold limit</th></tr></thead><tbody>%s</tbody></table></div>
+<div class="card"><h2>Reading it</h2>
+<p style="font-size:13px;color:#4a5666;margin:0">A stepper loses torque
+as it warms: the magnets lose remanence (~0.11&nbsp;%%/K for NdFeB) and
+the winding resistance rises (~0.39&nbsp;%%/K), which eats the voltage
+headroom fast moves need. Tune your printer to the value at the
+temperature it actually reaches mid-print — a limit measured on a cold
+motor will not survive an hour of printing.</p></div>
+<div style="text-align:center;color:#6b7787;font-size:12px">
+Plugin by Steven (Fragmon) &mdash; Crydteam</div>
+</div></body></html>"""
+                    % (self._meta_to_html(meta), W, H, W,
+                       PAD, PAD, W - 2 * PAD, H - 2 * PAD, grid,
+                       pts, dots, xlab, ylab,
+                       W // 2, H - 14, H // 2, H // 2, rows))
 
     def cmd_STATUS(self, gcmd):
         max_curr_str = ("%.3f A" % self.max_current

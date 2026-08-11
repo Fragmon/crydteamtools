@@ -43,9 +43,14 @@ and originates here.
 ## Requirements
 
 - A TMC driver with runtime register access: TMC2130 / 2209 / 2240 / 5160.
-- **SpreadCycle** on the tested axis (no `stealthchop_threshold`) — the
-  chopper registers do nothing in StealthChop, and the plugin refuses to run
-  there rather than produce meaningless numbers.
+- **SpreadCycle at the test speed.** The chopper registers do nothing in
+  StealthChop, so the plugin checks the real driver state and refuses rather
+  than produce meaningless numbers. Note that `stealthchop_threshold: 0` in
+  Klipper does *not* mean "no StealthChop": it enables StealthChop but pins
+  its velocity limit to the minimum, so the motor uses StealthChop at
+  standstill and SpreadCycle for every real move — that setup is tunable, and
+  `CHOPPER_TEST_STATUS` tells you the exact threshold speed. Only
+  `stealthchop_threshold: 999999` (StealthChop at every speed) is refused.
 - For the thermal stage: a temperature sensor on the motor
   (`motor_sensor:` in `[chopper_test]`) or a TMC2240, which reports its own
   die temperature. Without either, the stage is skipped.
