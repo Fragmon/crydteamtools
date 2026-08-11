@@ -205,7 +205,8 @@ winding temperature, but it tracks it.
 |---|---|---|
 | `AXIS` | config | Axis to test |
 | `VELOCITY` | printer `max_velocity` | Speed of the probe moves — use the speed you care about, e.g. the fastest point from your limit map |
-| `ACCEL` | printer `max_accel` | Starting acceleration. The first point climbs from here until it breaks, establishing the cold limit |
+| `ACCEL` | printer `max_accel` | Starting acceleration. The first point climbs from here in `STEP` increments until it breaks, establishing the cold limit |
+| `ACCEL_MAX` | printer `max_accel` (or `ACCEL` if higher) | Hard ceiling for that climb — the test never drives the machine above it |
 | `TEMP_MAX` | 70 | Stop once the motor reaches this temperature (°C) |
 | `TEMP_STEP` | 3 | Target temperature rise (K) between measured points |
 | `SOAK` | 25 | Max seconds of heating moves between points |

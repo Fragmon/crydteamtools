@@ -2536,6 +2536,17 @@ new Chart(document.getElementById('envChart'), {
         v_max, a_max, _ = self._get_printer_limits()
         velocity = gcmd.get_float('VELOCITY', v_max, above=0.)
         accel = gcmd.get_float('ACCEL', a_max, above=0.)
+        # Ceiling for the cold-limit climb. Without one the first
+        # checkpoint would keep raising the acceleration as long as the
+        # motor holds, and drive the machine well past anything it is
+        # configured for.
+        accel_max = gcmd.get_float('ACCEL_MAX', 0.0, minval=0.)
+        if accel_max <= 0:
+            accel_max = max(a_max, accel)
+        if accel_max < accel:
+            raise gcmd.error(
+                "ACCEL_MAX (%.0f) must not be below ACCEL (%.0f)"
+                % (accel_max, accel))
         temp_max = gcmd.get_float('TEMP_MAX', 70.0, above=temp)
         temp_step = gcmd.get_float('TEMP_STEP', 3.0, above=0.)
         soak = gcmd.get_float('SOAK', 25.0, minval=0., maxval=600.)
@@ -2546,12 +2557,12 @@ new Chart(document.getElementById('envChart'), {
         gcmd.respond_info(
             "──── TORQUE FADE %s ────\n"
             "  sensor: %s (now %.1f °C) → stop at %.0f °C\n"
-            "  velocity %.0f mm/s | starting accel %.0f mm/s² | "
+            "  velocity %.0f mm/s | accel %.0f → never above %.0f mm/s² | "
             "step %.0f%% | %d moves per probe\n"
             "  The stress moves heat the motor themselves; between "
             "points it soaks up to %.0f s or until +%.1f K."
-            % (axis, source, temp, temp_max, velocity, accel, step * 100,
-               repeat, soak, temp_step))
+            % (axis, source, temp, temp_max, velocity, accel, accel_max,
+               step * 100, repeat, soak, temp_step))
 
         results = []
         timestamp = time.strftime('%Y-%m-%d_%H-%M-%S')
@@ -2584,20 +2595,37 @@ new Chart(document.getElementById('envChart'), {
                 # step up when it holds, so the curve follows the true
                 # limit in both directions instead of drifting down.
                 limit = None
+                # Probes are memoised per checkpoint: the value a climb
+                # step just measured is the same one the next iteration
+                # would start with, and measuring it twice only costs a
+                # re-home.
+                probed = {}
+
+                def probe_once(a):
+                    key = round(a, 1)
+                    if key not in probed:
+                        self._set_limits(velocity=velocity * 1.2, accel=a)
+                        probed[key] = probe(a)
+                    return probed[key]
+
                 for _ in range(8):
-                    self._set_limits(velocity=velocity * 1.2, accel=accel)
-                    r = probe(accel)
+                    r = probe_once(accel)
                     if r['failed']:
                         accel = max(100.0, accel * (1.0 - step))
                         continue
                     limit = accel
                     if first:
                         # Establish the cold limit properly: climb until
-                        # it breaks, then keep the last value that held.
+                        # it breaks or the ceiling is reached, then keep
+                        # the last value that held.
                         up = accel * (1.0 + step)
-                        self._set_limits(velocity=velocity * 1.2, accel=up)
-                        r2 = probe(up)
-                        if not r2['failed']:
+                        if up > accel_max:
+                            gcmd.respond_info(
+                                "    ceiling %.0f mm/s² reached — not "
+                                "probing higher (raise ACCEL_MAX to go "
+                                "further)" % accel_max)
+                            break
+                        if not probe_once(up)['failed']:
                             accel = up
                             continue
                     break
