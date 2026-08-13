@@ -15,7 +15,7 @@ import time
 import json
 
 MODULE_NAME = "Speed Test"
-MODULE_VERSION = "1.6"
+MODULE_VERSION = "1.6.1"
 JAB_CRUISE_TIME = 0.05          # s at V per jab — identical for every V
 SOAK_MOVES = 20                 # jab moves per heating burst in
                                 # SPEED_TEST_TORQUE_FADE
@@ -84,6 +84,12 @@ class SpeedTest:
 
         # State
         self._last_mcu_pos = {}
+        # False whenever the axis may have moved outside a
+        # measurement, so the next one re-homes before taking its
+        # baseline. The lost-step verdict is baseline-at-home vs
+        # position-after-home; a baseline taken anywhere else reports
+        # that distance as a loss.
+        self._ref_valid = False
         self._tmc_cache = {}            # axis -> tmc obj (or None)
         self._sample_buf = {}           # axis -> list[int]
         self._sampling_active = False
@@ -380,6 +386,7 @@ class SpeedTest:
     # ─── Movement primitives ──────────────────────────────────────────
 
     def _move_to_axis(self, axis, pos, feed_mm_s):
+        self._ref_valid = False
         feed = max(60., feed_mm_s * 60.)
         self.gcode.run_script_from_command(
             "G1 %s%.3f F%.1f" % (axis, pos, feed))
@@ -682,6 +689,10 @@ class SpeedTest:
         else:
             sample_axes = tuple(axes)
 
+        if not self._ref_valid:
+            # The axis moved since the last measurement (or this
+            # is the first one), so the reference is stale.
+            self._ensure_homed(list(axes), testbench=testbench)
         self._store_mcu_pos(sample_axes)
         pos_before = dict(self._last_mcu_pos)
         if self.monitor_tmc:
@@ -694,6 +705,7 @@ class SpeedTest:
         # Re-home and compare
         self._ensure_homed(list(axes), testbench=testbench)
         skips = self._check_skip(sample_axes)
+        self._ref_valid = True
         tmc_stats = {ax: self._tmc_stats(ax) for ax in sample_axes}
 
         failed = bool(skips)
